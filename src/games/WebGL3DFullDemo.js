@@ -299,13 +299,26 @@ function run() {
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, 1, 1, 0, gl.RGB, gl.UNSIGNED_BYTE, new Uint8Array([5, 8, 20]));
   var bgLoaded = false;
   var bgImage = wx.createImage();
-  bgImage.onload = function() {
-    gl.bindTexture(gl.TEXTURE_2D, bgTex);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bgImage);
-    bgLoaded = true;
-  };
-  bgImage.src = 'assets/background/01.png';
+  var bgList = [
+    'assets/background/01.png',
+    'assets/background/02.png',
+    'assets/background/03.png',
+    'assets/background/04.png'
+  ];
+  var bgIndex = Math.floor(Math.random() * bgList.length);
+  var bgChangeTimer = 0;
+  var bgChangeInterval = 12;
+  function loadBg(path) {
+    bgLoaded = false;
+    bgImage.onload = function() {
+      gl.bindTexture(gl.TEXTURE_2D, bgTex);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bgImage);
+      bgLoaded = true;
+    };
+    bgImage.src = path;
+  }
+  loadBg(bgList[bgIndex]);
 
   var proj = new Float32Array(16);
   var view = new Float32Array(16);
@@ -316,8 +329,22 @@ function run() {
   var tmp3 = new Float32Array(16);
   var mvp = new Float32Array(16);
   var n3 = new Float32Array(9);
+  var LIGHT_DIR = new Float32Array([0.45, 0.9, 0.35]);
+  var C_FLOOR = new Float32Array([0.06, 0.09, 0.16]);
+  var C_PLANET_A = new Float32Array([0.36, 0.55, 0.9]);
+  var C_PLANET_B = new Float32Array([0.24, 0.68, 0.92]);
+  var C_SHIP_BODY = new Float32Array([0.82, 0.85, 0.9]);
+  var C_SHIP_NOSE = new Float32Array([0.9, 0.92, 0.96]);
+  var C_SHIP_WING = new Float32Array([0.72, 0.76, 0.84]);
+  var C_SHIP_WING2 = new Float32Array([0.68, 0.72, 0.8]);
+  var C_SHIP_REAR = new Float32Array([0.67, 0.71, 0.8]);
+  var C_SHIP_ENGINE = new Float32Array([0.45, 0.5, 0.58]);
+  var C_SHIP_GLOW = new Float32Array([0.3, 0.75, 1.0]);
+  var C_BULLET = new Float32Array([1.0, 0.84, 0.18]);
+  var C_ENEMY = new Float32Array([0.94, 0.33, 0.3]);
 
   var playerX = 0;
+  var targetPlayerX = 0;
   var playerBank = 0;
   var bullets = [];
   var enemies = [];
@@ -338,11 +365,12 @@ function run() {
   var endedShown = false;
 
   function spawnEnemy() {
+    var progress = gameStarted ? Math.min(1, score / needScore) : 0;
     enemies.push({
       x: (Math.random() * 2 - 1) * 2.75,
       z: -10 - Math.random() * 2.2,
       y: 0.27 + Math.random() * 0.18,
-      speed: 2.9 + Math.random() * 1.2,
+      speed: 2.7 + progress * 2.1 + Math.random() * 1.1,
       phase: Math.random() * Math.PI * 2
     });
   }
@@ -352,14 +380,13 @@ function run() {
     var x = e.touches[0].clientX || e.touches[0].x || 0;
     var nx = (x / w) * 2 - 1;
     var target = Math.max(-2.9, Math.min(2.9, nx * 3.2));
-    playerBank = (target - playerX) * 0.6;
-    playerX = target;
+    targetPlayerX = target;
   });
   wx.onTouchStart(function(e) {
     if (gameOver || !e.touches || !e.touches.length) return;
     var x = e.touches[0].clientX || e.touches[0].x || 0;
     var nx = (x / w) * 2 - 1;
-    playerX = Math.max(-2.9, Math.min(2.9, nx * 3.2));
+    targetPlayerX = Math.max(-2.9, Math.min(2.9, nx * 3.2));
   });
 
   function bindMesh(buf) {
@@ -377,7 +404,7 @@ function run() {
     n3From4(modelMat, n3);
     gl.uniformMatrix4fv(locMesh.mvp, false, mvp);
     gl.uniformMatrix3fv(locMesh.n, false, n3);
-    gl.uniform3fv(locMesh.light, new Float32Array([0.45, 0.9, 0.35]));
+    gl.uniform3fv(locMesh.light, LIGHT_DIR);
     gl.uniform3fv(locMesh.rgb, color);
     gl.drawArrays(gl.TRIANGLES, 0, count);
   }
@@ -399,31 +426,45 @@ function run() {
 
     // fuselage
     composePart(model, 0, 0, -0.02, 0.32, 0.17, 0.95, tmp3);
-    drawMesh(bCube, nCube, new Float32Array([0.82, 0.85, 0.9]), tmp3);
+    drawMesh(bCube, nCube, C_SHIP_BODY, tmp3);
     // nose
     composePart(model, 0, 0.01, -0.56, 0.18, 0.12, 0.36, tmp3);
-    drawMesh(bCube, nCube, new Float32Array([0.9, 0.92, 0.96]), tmp3);
+    drawMesh(bCube, nCube, C_SHIP_NOSE, tmp3);
     // main wings
     composePart(model, 0, -0.01, -0.06, 1.18, 0.05, 0.22, tmp3);
-    drawMesh(bCube, nCube, new Float32Array([0.72, 0.76, 0.84]), tmp3);
+    drawMesh(bCube, nCube, C_SHIP_WING, tmp3);
     // 通过两块独立翼片提供左右“调平”能力
     composePart(model, -0.44, -0.01 - playerWingBalanceY, -0.06, 0.34, 0.052, 0.22, tmp3);
-    drawMesh(bCube, nCube, new Float32Array([0.68, 0.72, 0.8]), tmp3);
+    drawMesh(bCube, nCube, C_SHIP_WING2, tmp3);
     composePart(model, 0.44, -0.01 + playerWingBalanceY, -0.06, 0.34, 0.052, 0.22, tmp3);
-    drawMesh(bCube, nCube, new Float32Array([0.68, 0.72, 0.8]), tmp3);
+    drawMesh(bCube, nCube, C_SHIP_WING2, tmp3);
     // rear wings
     composePart(model, 0, 0.04, 0.28, 0.58, 0.04, 0.18, tmp3);
-    drawMesh(bCube, nCube, new Float32Array([0.67, 0.71, 0.8]), tmp3);
+    drawMesh(bCube, nCube, C_SHIP_REAR, tmp3);
     // twin engines
     composePart(model, -0.12, -0.03, 0.38, 0.1, 0.09, 0.28, tmp3);
-    drawMesh(bCube, nCube, new Float32Array([0.45, 0.5, 0.58]), tmp3);
+    drawMesh(bCube, nCube, C_SHIP_ENGINE, tmp3);
     composePart(model, 0.12, -0.03, 0.38, 0.1, 0.09, 0.28, tmp3);
-    drawMesh(bCube, nCube, new Float32Array([0.45, 0.5, 0.58]), tmp3);
+    drawMesh(bCube, nCube, C_SHIP_ENGINE, tmp3);
     // engine glow
     composePart(model, -0.12, -0.04, 0.56, 0.07, 0.07, 0.08, tmp3);
-    drawMesh(bCube, nCube, new Float32Array([0.3, 0.75, 1.0]), tmp3);
+    drawMesh(bCube, nCube, C_SHIP_GLOW, tmp3);
     composePart(model, 0.12, -0.04, 0.56, 0.07, 0.07, 0.08, tmp3);
-    drawMesh(bCube, nCube, new Float32Array([0.3, 0.75, 1.0]), tmp3);
+    drawMesh(bCube, nCube, C_SHIP_GLOW, tmp3);
+  }
+
+  function showHome() {
+    gameStarted = false;
+    gameOver = false;
+    wx.showModal({
+      title: '3D首页',
+      content: '拖动左右移动战机\n目标分: ' + needScore + '\n点击“开始”进入3D战斗',
+      confirmText: '开始',
+      showCancel: false,
+      success: function() {
+        startGame();
+      }
+    });
   }
 
   function endGame(win) {
@@ -433,13 +474,25 @@ function run() {
     wx.showModal({
       title: win ? '3D 通关' : '3D 失败',
       content: '得分: ' + score + ' / ' + needScore + (win ? '\n已达到目标分数。' : '\n再试一次！'),
-      showCancel: false
+      showCancel: true,
+      cancelText: '首页',
+      confirmText: '再来一局',
+      success: function(res) {
+        if (res.confirm) {
+          startGame();
+        } else {
+          showHome();
+        }
+      }
     });
   }
 
   function startGame() {
     score = 0;
     hp = 5;
+    playerX = 0;
+    targetPlayerX = 0;
+    playerBank = 0;
     bullets = [];
     enemies = [];
     spawnT = 0;
@@ -451,15 +504,7 @@ function run() {
     wx.showToast({ title: '3D开战', icon: 'none', duration: 900 });
   }
 
-  wx.showModal({
-    title: '3D首页',
-    content: '拖动左右移动战机\n目标分: ' + needScore + '\n点击“开始”进入3D战斗',
-    confirmText: '开始',
-    showCancel: false,
-    success: function() {
-      startGame();
-    }
-  });
+  showHome();
 
   var last = Date.now();
   function frame() {
@@ -469,10 +514,21 @@ function run() {
     var left = duration - (now - startAt) / 1000;
 
     if (gameStarted && !gameOver) {
+      var smooth = Math.min(1, dt * 14);
+      var prevX = playerX;
+      playerX += (targetPlayerX - playerX) * smooth;
+      playerBank = (playerX - prevX) * 16;
       spawnT += dt;
       fireT += dt;
+      bgChangeTimer += dt;
+      if (bgChangeTimer >= bgChangeInterval) {
+        bgChangeTimer = 0;
+        bgIndex = (bgIndex + 1) % bgList.length;
+        loadBg(bgList[bgIndex]);
+      }
 
-      if (spawnT >= 0.5) {
+      var spawnInterval = Math.max(0.28, 0.58 - Math.min(1, score / needScore) * 0.24);
+      if (spawnT >= spawnInterval) {
         spawnT = 0;
         spawnEnemy();
       }
@@ -527,7 +583,7 @@ function run() {
       gl.bindBuffer(gl.ARRAY_BUFFER, bStars);
       gl.bufferSubData(gl.ARRAY_BUFFER, 0, stars);
 
-      playerBank *= 0.92;
+      playerBank *= 0.86;
       if (score >= needScore) endGame(true);
       if (left <= 0) endGame(score >= needScore);
     }
@@ -568,18 +624,18 @@ function run() {
     // mesh pass
     gl.useProgram(pMesh);
     id4(model);
-    drawMesh(bFloor, nFloor, new Float32Array([0.06, 0.09, 0.16]), model);
+    drawMesh(bFloor, nFloor, C_FLOOR, model);
 
     // far planets
     translate4(model, 2.55, 2.6, -10.8);
     scale4(tmp, 1.25, 1.25, 1.25);
     mul4(tmp2, model, tmp);
-    drawMesh(bCube, nCube, new Float32Array([0.36, 0.55, 0.9]), tmp2);
+    drawMesh(bCube, nCube, C_PLANET_A, tmp2);
 
     translate4(model, -2.9, 3.1, -9.4);
     scale4(tmp, 0.78, 0.78, 0.78);
     mul4(tmp2, model, tmp);
-    drawMesh(bCube, nCube, new Float32Array([0.24, 0.68, 0.92]), tmp2);
+    drawMesh(bCube, nCube, C_PLANET_B, tmp2);
 
     drawPlayer(now);
 
@@ -587,7 +643,7 @@ function run() {
       translate4(model, bullets[i].x, bullets[i].y, bullets[i].z);
       scale4(tmp, 0.05, 0.05, 0.26);
       mul4(tmp2, model, tmp);
-      drawMesh(bCube, nCube, new Float32Array([1.0, 0.84, 0.18]), tmp2);
+      drawMesh(bCube, nCube, C_BULLET, tmp2);
     }
     for (i = 0; i < enemies.length; i++) {
       rotateY4(tmp, now * 0.0025 + i);
@@ -595,7 +651,7 @@ function run() {
       mul4(model, tmp2, tmp);
       scale4(tmp, 0.24, 0.24, 0.24);
       mul4(tmp2, model, tmp);
-      drawMesh(bCube, nCube, new Float32Array([0.94, 0.33, 0.3]), tmp2);
+      drawMesh(bCube, nCube, C_ENEMY, tmp2);
     }
 
     // simple HP bar + home target indicator
