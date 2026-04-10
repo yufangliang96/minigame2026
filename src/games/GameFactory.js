@@ -200,16 +200,6 @@ QuickTapGame.prototype.render = function() {
   }
 };
 
-QuickTapGame.prototype.onTouchStart = function(e) {
-  if (!e.touches || e.touches.length === 0) return;
-  const touch = e.touches[0];
-  const tx = touch.clientX || touch.x;
-  const ty = touch.clientY || touch.y;
-  if (tx === undefined || ty === undefined) return;
-  if (this.isPaused || this.isGameOver) return;
-  this.onTap(tx, ty);
-};
-
 // 抽签对决游戏
 function LotteryBattleGame(canvas) {
   this.canvas = canvas;
@@ -951,6 +941,15 @@ function SimpleShootingGame(canvas) {
   this.timeLeft = this.game.duration;
   this.isGameOver = false;
   this.player = { x: 0, y: 0, width: 72, height: 72, targetX: 0, targetY: 0, speed: 0.15, hp: 10, maxHp: 10 };
+  // ---- 让战机「竖起来」：机头尽量朝屏幕正上方，和子弹一条竖线 ----
+  // 只改 playerSpriteRotationDeg（度）。负数 = 逆时针旋转整张图。
+  // 机头还朝「右上」→ 把数再调负一点（如 -58、-62）；机头朝「左上」了→ 往 0 收（如 -48、-44）。
+  // 说明：player.png 是斜透视 3D 渲染，再怎么转也像「歪着拍照的飞机」，不可能和矢量机一样完全竖直；
+  //      若要观感完全竖直，请换「机头已朝上」的 2D 立绘/顶视透明 PNG，并把下面改成 0。
+  this.playerSpriteRotationDeg = -45;
+  // 机身「左右不平衡」：斜透视素材常见一侧机翼显低。旋转后做轻微错切 y += k*x（Canvas transform(1,k,0,1)）
+  // 负值抬右侧、压左侧，一般试 -0.06～-0.14；过狠会畸形；0 关闭。无法替代换对称立绘。
+  this.playerSpriteShearV = -0.1;
   this.bullets = [];
   this.enemies = [];
   this.enemyBullets = [];
@@ -1003,20 +1002,27 @@ function SimpleShootingGame(canvas) {
 
 SimpleShootingGame.prototype.loadBackgrounds = function() {
   var self = this;
+  // 星际战机滚动背景：换图时改下列路径即可（相对小游戏根目录）
+  var bgSrcs = [
+    'assets/background/01.png',
+    'assets/background/02.png',
+    'assets/background/03.png',
+    'assets/background/04.png'
+  ];
   this.bgImages = [];
   this.bgImagesLoaded = 0;
-  this.bgCount = 4;
+  this.bgCount = bgSrcs.length;
   this.bgScrollY = 0;
   this.bgSpeed = 30;
-  for (let i = 1; i <= this.bgCount; i++) {
+  for (var i = 0; i < bgSrcs.length; i++) {
     var img = wx.createImage();
     img.loaded = false;
-    img.index = i - 1;
+    img.index = i;
     img.onload = function() {
       this.loaded = true;
       self.bgImagesLoaded++;
     };
-    img.src = 'assets/background/background' + i + '.jpg';
+    img.src = bgSrcs[i];
     this.bgImages.push(img);
   }
 };
@@ -1027,7 +1033,11 @@ SimpleShootingGame.prototype.loadImages = function() {
   this.playerImg = wx.createImage();
   this.playerImgLoaded = false;
   this.playerImg.onload = function() { self.playerImgLoaded = true; };
-  this.playerImg.src = 'assets/images/player.png';
+  this.playerImg.onerror = function() {
+    self.playerImgLoaded = false;
+    console.warn('[SimpleShooting] 战机图加载失败，使用矢量绘制。路径: assets/player/player.png');
+  };
+  this.playerImg.src = 'assets/player/player.png';
   
   this.enemyImgNormal = wx.createImage();
   this.enemyImgNormalLoaded = false;
@@ -1093,6 +1103,8 @@ SimpleShootingGame.prototype.generateAsteroidVertices = function(size, variation
 
 SimpleShootingGame.prototype.pause = function() {
   this.isPaused = true;
+  this.shakeTime = 0;
+  this.shakeIntensity = 0;
   if (this.onPause) this.onPause();
 };
 
@@ -1530,6 +1542,11 @@ SimpleShootingGame.prototype.update = function(dt) {
     this.bossSpawnTimer = 0;
     this.finalBossWarning = 1.5;
     this.enemies = [];
+    var fbTaunts = [
+      '受死吧打工人', '福报球降临', 'KPI清零炮', '末班地铁你也赶不上',
+      '年终奖充公啦', '述职报告写了没', '终极甲方降临'
+    ];
+    var fbEmojis = ['😈', '👿', '🔥', '💀', '👹'];
     this.finalBoss = {
       x: this.width / 2 - 65,
       y: -120,
@@ -1540,7 +1557,9 @@ SimpleShootingGame.prototype.update = function(dt) {
       vx: 80,
       phase: 'entering',
       hitFlash: 0,
-      type: 'finalBoss'
+      type: 'finalBoss',
+      taunt: fbTaunts[Math.floor(Math.random() * fbTaunts.length)],
+      emoji: fbEmojis[Math.floor(Math.random() * fbEmojis.length)]
     };
   }
   
@@ -1600,23 +1619,28 @@ SimpleShootingGame.prototype.spawnEnemy = function() {
     '上班狗别玩了', '老板在后面', '工资涨了吗', 'PPT写完了吗',
     '打卡了吗', '摸鱼呢', '周报交了吗', 'KPI完成了吗',
     '今天又加班？', '房贷还了吗', '相亲失败了吧', '头发还好吗',
-    '打工人打工魂', '打工是不可能打工的', '你妈催婚了吗'
+    '打工人打工魂', '打工是不可能打工的', '你妈催婚了吗',
+    '手残别勉强', '子弹喂鸟呢', '我血条都不掉',
+    '菜是原罪', '回家种田吧', '人机都比你准'
   ];
   var fastTaunts = [
     '追不上', '太快了~', '溜了溜了',
     '下班跑这么快', '抢红包手速', '外卖要迟到了',
-    '赶地铁呢', '迟到扣全勤', '老板追不上我'
+    '赶地铁呢', '迟到扣全勤', '老板追不上我',
+    '略略略', '气不气', '吃尾气吧'
   ];
   var zigzagTaunts = [
     '你猜我往哪走', '左右横跳', '来抓我呀',
     '走位走位', '蛇皮走位', '你预判不了我',
-    '像极了爱情', '反复横跳', '人生就像我这样'
+    '像极了爱情', '反复横跳', '人生就像我这样',
+    '抖腿都没你能晃', 'FPS白玩了'
   ];
   var toughTaunts = [
     '就这伤害？', '给我挠痒？', '再来！', '不够看',
     '我房贷比你命硬', '我脸皮比这还厚',
     '加班都没怕过你', '甲方都骂不动我',
-    '被生活毒打惯了', '你这伤害不如老板的嘴'
+    '被生活毒打惯了', '你这伤害不如老板的嘴',
+    '刮痧师傅你好', '没吃饭吗', '护盾留着过年？'
   ];
   var bossTaunts = [
     '来打我呀！', '废物！', '就这点本事？', '哈哈哈来啊',
@@ -1624,17 +1648,18 @@ SimpleShootingGame.prototype.spawnEnemy = function() {
     '周末也别想跑', '你的年假我批了',
     '你写的bug我来看', '月薪三千还想赢？',
     '你连我PPT都打不过', '你的头发还好吗',
-    '打工人也敢挑战甲方'
+    '打工人也敢挑战甲方',
+    '终极考核开始', '述职报告写了吗', '年终奖没了'
   ];
   var tauntPool = { normal: normalTaunts, fast: fastTaunts, zigzag: zigzagTaunts, tough: toughTaunts, boss: bossTaunts };
   var pool = tauntPool[type] || normalTaunts;
   var taunt = pool[Math.floor(Math.random() * pool.length)];
   var emojis = {
-    normal: ['😏', '🤪', '😜', '🙃', '😤'],
-    fast: ['😝', '🤭', '😒'],
-    zigzag: ['💀', '👻', '👽'],
-    tough: ['🤡', '😈'],
-    boss: ['👿']
+    normal: ['😏', '🤪', '😜', '🙃', '😤', '😎', '🤡', '👎'],
+    fast: ['😝', '🤭', '😒', '💨', '🏃'],
+    zigzag: ['💀', '👻', '👽', '🌀', '🦎'],
+    tough: ['🤡', '😈', '🛡️', '🧱', '🦏'],
+    boss: ['👿', '💀', '🔥', '👹', '😈']
   };
   var emojiPool = emojis[type] || emojis.normal;
   var emoji = emojiPool[Math.floor(Math.random() * emojiPool.length)];
@@ -1829,6 +1854,8 @@ SimpleShootingGame.prototype.checkPlayerEnemyCollision = function(enemy) {
 SimpleShootingGame.prototype.gameOver = function(win) {
   if (this.isGameOver) return;
   this.isGameOver = true;
+  this.shakeTime = 0;
+  this.shakeIntensity = 0;
   if (this.timer) clearInterval(this.timer);
   if (this.onGameEnd) this.onGameEnd(win);
 };
@@ -2004,7 +2031,9 @@ SimpleShootingGame.prototype.renderBackground = function() {
 
 SimpleShootingGame.prototype.render = function() {
   this.ctx.save();
-  if (this.shakeTime > 0) {
+  // 受击抖动：仅在进行中的战斗里生效。暂停/结算弹窗时不跑 update，shakeTime 不会衰减，
+  // 若仍每帧随机 translate 会造成整屏抖动。
+  if (this.shakeTime > 0 && !this.isPaused && !this.isGameOver) {
     var sx = (Math.random() - 0.5) * this.shakeIntensity;
     var sy = (Math.random() - 0.5) * this.shakeIntensity;
     this.ctx.translate(sx, sy);
@@ -2172,12 +2201,22 @@ SimpleShootingGame.prototype.renderPlayer = function() {
   this.ctx.arc(cx, cy, 50, 0, Math.PI * 2);
   this.ctx.fill();
   
-  // 优先使用图片（旋转90度校正角度）
-  if (this.playerImgLoaded && this.playerImg) {
+  // 位图战机：角度见构造函数 playerSpriteRotationDeg（逆时针，度）
+  if (this.playerImgLoaded && this.playerImg && this.playerImg.width > 0) {
     this.ctx.save();
     this.ctx.translate(cx, cy);
-    this.ctx.rotate(Math.PI);
-    this.ctx.drawImage(this.playerImg, -w / 2, -h / 2, w, h);
+    var deg = typeof this.playerSpriteRotationDeg === 'number' ? this.playerSpriteRotationDeg : -56;
+    this.ctx.rotate((deg * Math.PI) / 180);
+    var sv = typeof this.playerSpriteShearV === 'number' ? this.playerSpriteShearV : 0;
+    if (sv !== 0) {
+      this.ctx.transform(1, sv, 0, 1, 0, 0);
+    }
+    var iw = this.playerImg.width;
+    var ih = this.playerImg.height;
+    var scale = Math.min(w / iw, h / ih);
+    var dw = iw * scale;
+    var dh = ih * scale;
+    this.ctx.drawImage(this.playerImg, -dw / 2, -dh / 2, dw, dh);
     this.ctx.restore();
   } else {
     // 回退到Canvas绘制
@@ -2499,6 +2538,40 @@ SimpleShootingGame.prototype.renderEnemies = function() {
       this.ctx.fillRect(hpX, hpY, hpW, hpH);
       this.ctx.fillStyle = '#F44336';
       this.ctx.fillRect(hpX, hpY, hpW * (e.hp / e.maxHp), hpH);
+    }
+
+    if (e.taunt || e.emoji) {
+      this.ctx.save();
+      this.ctx.textAlign = 'center';
+      this.ctx.textBaseline = 'bottom';
+      var labelBottom = e.maxHp > 1 ? e.y - 11 : e.y - 5;
+      var maxTextW = Math.min(this.width - 24, Math.max(140, e.width + 72));
+      if (e.emoji) {
+        this.ctx.font = '20px Arial';
+        this.ctx.strokeStyle = 'rgba(0,0,0,0.88)';
+        this.ctx.lineWidth = 3;
+        this.ctx.lineJoin = 'round';
+        this.ctx.fillStyle = '#FFFFFF';
+        this.ctx.strokeText(e.emoji, ecx, labelBottom);
+        this.ctx.fillText(e.emoji, ecx, labelBottom);
+        labelBottom -= 22;
+      }
+      if (e.taunt) {
+        this.ctx.font = 'bold 11px Arial';
+        var t = e.taunt;
+        while (t.length > 1 && this.ctx.measureText(t + '…').width > maxTextW) {
+          t = t.slice(0, -1);
+        }
+        if (t !== e.taunt) {
+          t += '…';
+        }
+        this.ctx.strokeStyle = 'rgba(0,0,0,0.92)';
+        this.ctx.lineWidth = 3.5;
+        this.ctx.fillStyle = '#FFEB3B';
+        this.ctx.strokeText(t, ecx, labelBottom);
+        this.ctx.fillText(t, ecx, labelBottom);
+      }
+      this.ctx.restore();
     }
     
     this.ctx.globalAlpha = 1;
@@ -2917,10 +2990,44 @@ SimpleShootingGame.prototype.renderFinalBoss = function() {
   this.ctx.lineWidth = 1;
   this.ctx.strokeRect(hpX, hpY, hpW, hpH);
   
+  this.ctx.textAlign = 'center';
+  this.ctx.textBaseline = 'bottom';
+  var titleY = hpY - 4;
+  if (boss.taunt || boss.emoji) {
+    var bubbleW = Math.min(this.width - 20, 220);
+    if (boss.emoji) {
+      this.ctx.font = '22px Arial';
+      this.ctx.strokeStyle = 'rgba(0,0,0,0.9)';
+      this.ctx.lineWidth = 3;
+      this.ctx.fillStyle = '#FFF';
+      this.ctx.strokeText(boss.emoji, cx, titleY);
+      this.ctx.fillText(boss.emoji, cx, titleY);
+      titleY -= 24;
+    }
+    if (boss.taunt) {
+      this.ctx.font = 'bold 12px Arial';
+      var bt = boss.taunt;
+      while (bt.length > 1 && this.ctx.measureText(bt + '…').width > bubbleW) {
+        bt = bt.slice(0, -1);
+      }
+      if (bt !== boss.taunt) {
+        bt += '…';
+      }
+      this.ctx.strokeStyle = 'rgba(0,0,0,0.92)';
+      this.ctx.lineWidth = 3.5;
+      this.ctx.fillStyle = '#FFEB3B';
+      this.ctx.strokeText(bt, cx, titleY);
+      this.ctx.fillText(bt, cx, titleY);
+      titleY -= 16;
+    }
+  }
   this.ctx.font = 'bold 12px Arial';
   this.ctx.fillStyle = '#FFF';
-  this.ctx.textAlign = 'center';
-  this.ctx.fillText('最终BOSS', cx, hpY - 4);
+  this.ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+  this.ctx.lineWidth = 2.5;
+  this.ctx.strokeText('最终BOSS', cx, titleY);
+  this.ctx.fillText('最终BOSS', cx, titleY);
+  this.ctx.textBaseline = 'alphabetic';
   
   this.ctx.globalAlpha = 1;
 };

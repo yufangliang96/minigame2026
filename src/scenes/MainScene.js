@@ -1,7 +1,6 @@
 // 主场景 - 游戏主界面
 const BaseScene = require('./BaseScene.js');
 const Button = require('../components/Button.js');
-const ProgressBar = require('../components/ProgressBar.js');
 
 function getGameManager() {
   try {
@@ -110,19 +109,16 @@ MainScene.prototype.onTouchStart = function(e) {
     y = e.changedTouches[0].clientY || e.changedTouches[0].y;
   }
   if (x === undefined || y === undefined) return;
-  
-  console.log('[Touch] x=' + x + ', y=' + y + ', children=' + this.children.length);
+
   for (let i = 0; i < this.children.length; i++) {
     const child = this.children[i];
     if (child.contains && child.contains(x, y)) {
-      console.log('[Touch] Button found:', child.text);
       child.onPress();
     }
   }
 };
 
 MainScene.prototype.onTouchEnd = function(e) {
-  console.log('[TouchEnd]');
   for (let i = 0; i < this.children.length; i++) {
     const child = this.children[i];
     if (child.onRelease) child.onRelease();
@@ -135,13 +131,6 @@ MainScene.prototype.render = function(ctx) {
   
   ctx.fillStyle = '#1A1A2E';
   ctx.fillRect(0, 0, this.width, this.height);
-
-  ctx.fillStyle = '#4CAF50';
-  ctx.fillRect(5, 55, 30, 30);
-  ctx.fillStyle = '#FFFFFF';
-  ctx.font = '10px Arial';
-  ctx.textAlign = 'center';
-  ctx.fillText('OK', 20, 76);
 
   if (!gm) {
     ctx.fillStyle = '#FF0000';

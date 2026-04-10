@@ -24,6 +24,10 @@ GameManager.prototype.loadData = function() {
     this.unlockedGames = new Set(unlocked || []);
     this.winStreak = streak || 0;
     this.achievements = new Set(achieve || []);
+
+    const today = new Date().toDateString();
+    const todayStored = wx.getStorageSync(STORAGE_KEYS.TODAY_GAMES) || { date: '', games: [] };
+    this.todayGames = todayStored.date === today && Array.isArray(todayStored.games) ? todayStored.games.slice() : [];
   } catch (e) {
     console.error('加载数据失败:', e);
   }
@@ -99,8 +103,8 @@ GameManager.prototype.checkLuckyChildAchievement = function() {
     gameCounts[id] = (gameCounts[id] || 0) + 1;
   });
   
-  for (const count in gameCounts) {
-    if (gameCounts[count] >= 3) {
+  for (const gameId in gameCounts) {
+    if (gameCounts[gameId] >= 3) {
       this.unlockAchievement(ACHIEVEMENTS.LUCKY_CHILD.id);
       return true;
     }
