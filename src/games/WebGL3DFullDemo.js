@@ -1309,6 +1309,11 @@ function run() {
 
   var UI_ATLAS_W = 768;
   var UI_ATLAS_H = 640;
+  // UI atlas fixed regions (px -> uv)，避免真机上浮点区间串采样
+  // 注意：UI atlas 上传时使用了 UNPACK_FLIP_Y_WEBGL=1，V 轴需按翻转后坐标填写
+  var HOME_START_UV = [0.08, 1 - 492 / 640, 0.92, 1 - 410 / 640];
+  var HOME_INTRO_UV = [0.08, 1 - 600 / 640, 0.92, 1 - 518 / 640];
+  var PAUSE_TEXT_UV = [0, 1 - 440 / 640, 1, 1 - 320 / 640];
   var uiAtlasTex = gl.createTexture();
   var uiAtlasOk = false;
   var homeStartLabelTex = gl.createTexture();
@@ -1357,6 +1362,13 @@ function run() {
     var oc =
       wx.createOffscreenCanvas &&
       wx.createOffscreenCanvas({ type: '2d', width: UI_ATLAS_W, height: UI_ATLAS_H });
+    if (!oc && wx.createCanvas) {
+      try {
+        oc = wx.createCanvas();
+        oc.width = UI_ATLAS_W;
+        oc.height = UI_ATLAS_H;
+      } catch (e) {}
+    }
     if (!oc) {
       try {
         var canvasEl = document.createElement('canvas');
@@ -1383,8 +1395,8 @@ function run() {
     ctx.strokeStyle = 'rgba(12,18,28,0.9)';
     ctx.fillStyle = 'rgba(242,246,255,0.98)';
     ctx.font = 'bold 46px sans-serif';
-    ctx.strokeText('3D 随机闯关', 40, 28);
-    ctx.fillText('3D 随机闯关', 40, 28);
+    ctx.strokeText('万花筒.游境', 40, 28);
+    ctx.fillText('万花筒.游境', 40, 28);
     ctx.font = '30px sans-serif';
     ctx.fillStyle = 'rgba(212,222,244,0.9)';
     ctx.font = '24px sans-serif';
@@ -1406,6 +1418,48 @@ function run() {
     ctx.strokeText('轻触屏幕任意处继续', 40, 398);
     ctx.fillText('轻触屏幕任意处继续', 40, 398);
 
+    // 首页按钮文字（真机兜底：与 UI Atlas 同链路，避免独立纹理在部分机型不显示）
+    function roundRect(cx, cy, cw, ch, rr, fill, stroke) {
+      ctx.beginPath();
+      ctx.moveTo(cx + rr, cy);
+      ctx.lineTo(cx + cw - rr, cy);
+      ctx.quadraticCurveTo(cx + cw, cy, cx + cw, cy + rr);
+      ctx.lineTo(cx + cw, cy + ch - rr);
+      ctx.quadraticCurveTo(cx + cw, cy + ch, cx + cw - rr, cy + ch);
+      ctx.lineTo(cx + rr, cy + ch);
+      ctx.quadraticCurveTo(cx, cy + ch, cx, cy + ch - rr);
+      ctx.lineTo(cx, cy + rr);
+      ctx.quadraticCurveTo(cx, cy, cx + rr, cy);
+      ctx.closePath();
+      ctx.fillStyle = fill;
+      ctx.fill();
+      if (stroke) {
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+    }
+    var bx = 60;
+    var bw = UI_ATLAS_W - 120;
+    roundRect(bx, 416, bw, 70, 20, 'rgba(4,10,20,0.34)', 'rgba(220,236,255,0.18)');
+    roundRect(bx, 524, bw, 70, 20, 'rgba(4,10,20,0.3)', 'rgba(220,236,255,0.16)');
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.shadowColor = 'rgba(0,0,0,0.68)';
+    ctx.shadowBlur = 8;
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 2;
+    ctx.font = 'bold 52px sans-serif';
+    ctx.fillStyle = 'rgba(232,246,235,0.99)';
+    ctx.strokeStyle = 'rgba(10,16,28,0.9)';
+    ctx.lineWidth = 4;
+    ctx.strokeText('开始游戏', UI_ATLAS_W * 0.5, 451);
+    ctx.fillText('开始游戏', UI_ATLAS_W * 0.5, 451);
+    ctx.font = 'bold 48px sans-serif';
+    ctx.fillStyle = 'rgba(228,238,255,0.99)';
+    ctx.strokeText('游戏介绍', UI_ATLAS_W * 0.5, 559);
+    ctx.fillText('游戏介绍', UI_ATLAS_W * 0.5, 559);
+
     gl.bindTexture(gl.TEXTURE_2D, uiAtlasTex);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
@@ -1420,6 +1474,13 @@ function run() {
     var oc =
       wx.createOffscreenCanvas &&
       wx.createOffscreenCanvas({ type: '2d', width: wPx, height: hPx });
+    if (!oc && wx.createCanvas) {
+      try {
+        oc = wx.createCanvas();
+        oc.width = wPx;
+        oc.height = hPx;
+      } catch (e) {}
+    }
     if (!oc) {
       try {
         var canvasEl = document.createElement('canvas');
@@ -1831,9 +1892,9 @@ function run() {
       gait: 0,
       shootT: 0,
       shootInterval: 0.55,
-      r: 2.25,
-      hp: 140,
-      hpMax: 140,
+      r: 2.9,
+      hp: 240,
+      hpMax: 240,
       elite: true,
       boss: true,
       color: new Float32Array([0.45, 0.12, 0.8]),
@@ -1856,7 +1917,7 @@ function run() {
       y: y,
       z: z,
       kind: kind,
-      life: 12.0,
+      life: 16.0,
       phase: Math.random() * Math.PI * 2
     });
     if (drops.length > 18) drops.splice(0, drops.length - 18);
@@ -2423,8 +2484,8 @@ var dragAnchorPlayerY = 0;
     var halfH = er * sc;
     if (e.boss) {
       // 防止 Boss 因透视靠近时“膨胀”到超出屏幕
-      halfW = Math.min(1.05, halfW);
-      halfH = Math.min(1.05, halfH);
+      halfW = Math.min(1.35, halfW);
+      halfH = Math.min(1.35, halfH);
     }
     var tex = enemyBallTextures[e.boss ? 'boss' : (e.enemyType || 'normal')];
     if (!tex) {
@@ -2515,6 +2576,7 @@ var dragAnchorPlayerY = 0;
     var startPulse = 1 + Math.sin(homeFxT * 2.7) * 0.024;
     var startPressScale = Date.now() < homeStartPressedUntil ? 0.96 : 1;
     var introPressScale = Date.now() < homeIntroPressedUntil ? 0.97 : 1;
+    // 首页按钮文案强制走独立纹理，避免 atlas 区域在模拟器/真机上的差异采样
     if (homeStartLabelOk) {
       drawUiTexture(homeStartLabelTex, 0, -0.26, 0.44 * startPulse * startPressScale, 0.07 * startPulse * startPressScale);
     }
@@ -2559,9 +2621,7 @@ var dragAnchorPlayerY = 0;
     gl.enableVertexAttribArray(locHud.pos);
     gl.enableVertexAttribArray(locHud.col);
     gl.drawArrays(gl.TRIANGLES, 0, nPauseDimVerts);
-    if (uiAtlasOk) {
-      drawUiTexRegion(0, 0, 1, 312 / UI_ATLAS_H, 0, 0.02, 0.9, 0.38);
-    }
+    // 暂停文案在部分模拟器/真机上存在 atlas 采样错位，先禁用该层避免出现乱码块
     gl.disable(gl.BLEND);
     gl.enable(gl.CULL_FACE);
     gl.enable(gl.DEPTH_TEST);
@@ -2879,9 +2939,10 @@ var dragAnchorPlayerY = 0;
           enemies[i].z += (bossFightZ - enemies[i].z) * dt * 0.9;
           enemies[i].z = Math.max(-10.5, Math.min(-5.8, enemies[i].z));
         } else {
-          enemies[i].z += enemies[i].speed * dt * flowMul * 0.66;
+          // 普通目标前进速度降档，避免在屏幕中部“突然穿过并消失”
+          enemies[i].z += enemies[i].speed * dt * (0.52 + Math.min(1.2, flowMul) * 0.22);
         }
-        if (!enemies[i].boss && enemies[i].z > 2.6) {
+        if (!enemies[i].boss && enemies[i].z > 3.4) {
           hp -= enemies[i].boss ? 0.7 : 0.4;
           enemies.splice(i, 1);
           if (bossActive && hp > 0 && enemies.length === 0) bossActive = false;
@@ -2901,7 +2962,8 @@ var dragAnchorPlayerY = 0;
         var pdx = enemyBullets[i].x - playerX;
         var pdy = enemyBullets[i].y - playerY;
         var pdz = enemyBullets[i].z - playerZ;
-        if (pdx * pdx + pdy * pdy * 1.35 + pdz * pdz < 0.09) {
+        var playerHitR = enemyBullets[i].kind === 'boss' ? 0.62 : 0.5;
+        if (pdx * pdx + pdy * pdy * 1.08 + pdz * pdz < playerHitR * playerHitR) {
           enemyBullets.splice(i, 1);
           hp -= shieldTimer > 0 ? 0.15 : 0.45;
           if (hp <= 0) endGame(false);
@@ -2912,9 +2974,9 @@ var dragAnchorPlayerY = 0;
         var d = drops[i];
         d.life -= dt;
         d.phase += dt * 5.2;
-        d.z += 2.2 * dt * flowMul;
-        d.y += Math.sin(d.phase) * 0.0065;
-        if (d.life <= 0 || d.z > 1.4) {
+        d.z += 1.45 * dt * flowMul;
+        d.y += Math.sin(d.phase) * 0.004;
+        if (d.life <= 0 || d.z > 1.1) {
           drops.splice(i, 1);
           continue;
         }
@@ -2941,7 +3003,14 @@ var dragAnchorPlayerY = 0;
           if (dx * dx + dy * dy + dz * dz < hitR * hitR) {
             bullets.splice(j, 1);
             hit = true;
-            e.hp -= e.boss ? 0.4 : 1;
+            if (e.boss) {
+              var bossDmg = 0.2;
+              if (bulletLevel >= 4) bossDmg = 0.5;
+              else if (bulletLevel >= 2 || powerTimer > 0) bossDmg = 0.34;
+              e.hp -= bossDmg;
+            } else {
+              e.hp -= 1;
+            }
             e.flashT = 0.08;
             break;
           }
@@ -3158,37 +3227,57 @@ var dragAnchorPlayerY = 0;
 
       if (bossActive) {
         var boss = null;
+        var bossIdx = -1;
         var bossHpRatio = 0;
         for (i = 0; i < enemies.length; i++) {
           if (enemies[i].boss) {
             boss = enemies[i];
+            bossIdx = i;
             bossHpRatio = Math.max(0, (enemies[i].hp || 0) / Math.max(1, enemies[i].hpMax || 1));
             break;
           }
         }
-        if (boss && projectScreenPos(enemyBarPos, boss.x, boss.y + (boss.r || 1.8) * 1.15, boss.z)) {
-          gl.enable(gl.SCISSOR_TEST);
-          var bossBarFullW = Math.max(120, Math.floor((boss.r || 1.8) * 115));
+        if (boss) {
+          // 根因修复：按 Boss 实际渲染尺寸计算头顶锚点（而非固定顶部条），并做屏幕边缘钳制
+          var erBoss = boss.r || 2.9;
+          var scBoss = 1.26 * (1 + Math.sin(now * 0.005 + Math.max(0, bossIdx)) * 0.04);
+          var halfBoss = Math.min(1.35, erBoss * scBoss);
+          var posCenter = [0, 0];
+          var posTop = [0, 0];
+          var posRight = [0, 0];
+          var hasCenter = projectScreenPos(posCenter, boss.x, boss.y, boss.z);
+          var hasTop = projectScreenPos(posTop, boss.x, boss.y + halfBoss, boss.z);
+          var hasRight = projectScreenPos(posRight, boss.x + halfBoss, boss.y, boss.z);
+          if (!hasCenter && !hasTop) {
+            // 实在投影不到时再兜底到顶部
+            hasCenter = projectScreenPos(posCenter, boss.x, boss.y + halfBoss * 0.5, boss.z);
+            hasTop = hasCenter;
+            posTop[0] = posCenter[0];
+            posTop[1] = posCenter[1] + 18;
+          }
+          var anchorX = hasCenter ? posCenter[0] : posTop[0];
+          var anchorY = hasTop ? posTop[1] : (hasCenter ? (posCenter[1] + 20) : (renderH - 90));
+          var screenR = hasRight && hasCenter ? Math.abs(posRight[0] - posCenter[0]) : Math.max(42, halfBoss * 56);
+          var bossBarFullW = Math.max(130, Math.min(Math.floor(renderW * 0.72), Math.floor(screenR * 2.05)));
           var bossBarH = Math.max(8, Math.floor(10 * uiScaleY));
-          var bossBarX = Math.floor(enemyBarPos[0] - bossBarFullW * 0.5);
-          var bossBarY = Math.floor(enemyBarPos[1] + 16);
-          if (!(bossBarX > renderW - 2 || bossBarY > renderH - 2 || bossBarX + bossBarFullW < 2 || bossBarY + bossBarH < 2)) {
-            var clipX = Math.max(0, bossBarX);
-            var clipY = Math.max(0, bossBarY);
-            var clipW = Math.max(1, Math.min(renderW - clipX, bossBarFullW - Math.max(0, clipX - bossBarX)));
-            var clipH = Math.max(1, Math.min(renderH - clipY, bossBarH));
-            gl.scissor(clipX, clipY, clipW, clipH);
-            gl.clearColor(0.2, 0.14, 0.26, 1);
+          var bossBarX = Math.floor(anchorX - bossBarFullW * 0.5);
+          var bossBarY = Math.floor(anchorY + Math.max(8, Math.min(24, screenR * 0.22)));
+          // 保持贴近 Boss 同时保证完整可见
+          var safeXMin = Math.round(10 * uiScaleX);
+          var safeXMax = Math.max(safeXMin, renderW - bossBarFullW - safeXMin);
+          var safeYMin = Math.round(10 * uiScaleY);
+          var safeYMax = Math.max(safeYMin, renderH - bossBarH - Math.round(12 * uiScaleY));
+          bossBarX = Math.max(safeXMin, Math.min(safeXMax, bossBarX));
+          bossBarY = Math.max(safeYMin, Math.min(safeYMax, bossBarY));
+          gl.enable(gl.SCISSOR_TEST);
+          gl.scissor(bossBarX, bossBarY, Math.max(1, Math.min(renderW - bossBarX, bossBarFullW)), bossBarH);
+          gl.clearColor(0.2, 0.14, 0.26, 1);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          var bossFillW = Math.floor(bossBarFullW * bossHpRatio);
+          if (bossFillW > 0) {
+            gl.scissor(bossBarX, bossBarY, Math.max(1, Math.min(renderW - bossBarX, bossFillW)), bossBarH);
+            gl.clearColor(0.9, 0.26, 0.8, 1);
             gl.clear(gl.COLOR_BUFFER_BIT);
-            var bossFillW = Math.floor(bossBarFullW * bossHpRatio);
-            if (bossFillW > 0) {
-              var fillClipW = Math.max(1, Math.min(renderW - clipX, Math.min(clipW, bossFillW - Math.max(0, clipX - bossBarX))));
-              if (fillClipW > 0) {
-                gl.scissor(clipX, clipY, fillClipW, clipH);
-                gl.clearColor(0.9, 0.26, 0.8, 1);
-                gl.clear(gl.COLOR_BUFFER_BIT);
-              }
-            }
           }
           gl.disable(gl.SCISSOR_TEST);
         }
