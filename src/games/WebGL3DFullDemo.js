@@ -304,11 +304,34 @@ var FSH_BG = [
   'uniform float uMix;',
   'uniform vec2 uScroll;',
   'void main(){',
-  '  vec2 uv = clamp(vUV + uScroll, vec2(0.002), vec2(0.998));',
-  '  vec3 texA = texture2D(uTexA, uv).rgb;',
-  '  vec3 texB = texture2D(uTexB, uv).rgb;',
-  '  vec3 tex = mix(texA, texB, clamp(uBlend, 0.0, 1.0));',
+  '  vec2 p = vUV * 2.0 - 1.0;',
+  '  float edgeCurve = p.x * p.x * (0.055 + (1.0 - vUV.y) * 0.03);',
+  '  float horizonLift = (1.0 - vUV.y) * 0.07;',
+  '  vec2 uvNear = vUV + uScroll + vec2(0.0, edgeCurve - horizonLift);',
+  '  vec2 uvMid = (vUV - 0.5) * vec2(0.92, 0.95) + 0.5 + uScroll * 0.68 + vec2(0.0, edgeCurve * 0.65 - horizonLift * 0.76);',
+  '  vec2 uvFar = (vUV - 0.5) * vec2(0.84, 0.88) + 0.5 + uScroll * 0.42 + vec2(0.0, edgeCurve * 0.42 - horizonLift * 0.54);',
+  '  uvNear = clamp(uvNear, vec2(0.002), vec2(0.998));',
+  '  uvMid = clamp(uvMid, vec2(0.002), vec2(0.998));',
+  '  uvFar = clamp(uvFar, vec2(0.002), vec2(0.998));',
+  '  vec3 nearA = texture2D(uTexA, uvNear).rgb;',
+  '  vec3 nearB = texture2D(uTexB, uvNear).rgb;',
+  '  vec3 midA = texture2D(uTexA, uvMid).rgb;',
+  '  vec3 midB = texture2D(uTexB, uvMid).rgb;',
+  '  vec3 farA = texture2D(uTexA, uvFar).rgb;',
+  '  vec3 farB = texture2D(uTexB, uvFar).rgb;',
+  '  float blendT = clamp(uBlend, 0.0, 1.0);',
+  '  vec3 nearTex = mix(nearA, nearB, blendT);',
+  '  vec3 midTex = mix(midA, midB, blendT);',
+  '  vec3 farTex = mix(farA, farB, blendT);',
+  '  float dNear = smoothstep(0.32, 0.98, vUV.y);',
+  '  float dMid = smoothstep(0.18, 0.9, vUV.y);',
+  '  vec3 tex = mix(farTex * 0.83, midTex * 0.92, dMid);',
+  '  tex = mix(tex, nearTex, dNear);',
   '  tex = clamp((tex - vec3(0.5)) * 1.16 + vec3(0.5), 0.0, 1.0);',
+  '  float fog = smoothstep(0.0, 0.62, 1.0 - vUV.y);',
+  '  tex = mix(tex, tex * vec3(0.74, 0.81, 0.92), fog * 0.4);',
+  '  float vignette = smoothstep(1.15, 0.28, dot(p * vec2(0.9, 1.15), p * vec2(0.9, 1.15)));',
+  '  tex *= mix(0.82, 1.0, vignette);',
   '  vec3 tint = vec3(0.02, 0.04, 0.12);',
   '  gl_FragColor = vec4(mix(tint, tex, uMix), 1.0);',
   '}'
@@ -353,8 +376,20 @@ var FSH_BILLBOARD = [
   'precision mediump float;',
   'varying vec2 vUV;',
   'uniform sampler2D uTex;',
+  'uniform float uChromaOn;',
+  'uniform vec3 uChromaKey;',
+  'uniform float uChromaThreshold;',
   'void main(){',
   '  vec4 c = texture2D(uTex, vUV);',
+  '  if (uChromaOn > 0.5) {',
+  '    float d = distance(c.rgb, uChromaKey);',
+  '    float cyanMask = step(0.42, c.g) * step(0.52, c.b) * step(c.r, 0.46) * step(0.16, c.b - c.r) * step(0.1, c.g - c.r);',
+  '    float inCenterX = step(0.34, vUV.x) * step(vUV.x, 0.66);',
+  '    float inCenterY = step(0.2, vUV.y) * step(vUV.y, 0.82);',
+  '    float centerMask = inCenterX * inCenterY;',
+  '    float hardCenterCyan = centerMask * step(0.34, c.g) * step(0.45, c.b) * step(c.r, 0.52);',
+  '    if (d < uChromaThreshold || cyanMask > 0.5 || hardCenterCyan > 0.5) discard;',
+  '  }',
   '  vec2 p = vUV - vec2(0.5);',
   '  float rr = dot(p, p);',
   '  if (rr > 0.25) discard;',
@@ -444,12 +479,23 @@ function run() {
   // 开局默认后撤到全景位，确保进入战斗无需点击即可看到战机完整轮廓
   var PLAYER_Z_DEFAULT = -2.7;
   // 贴图朝向修正：不同素材坐标系可能相反，可在此翻转
-  var PLAYER_VISUAL_FLIP_X = false;
-  var PLAYER_VISUAL_FLIP_Y = false;
+  var PLAYER_VISUAL_FLIP_X = true;
+  var PLAYER_VISUAL_FLIP_Y = true;
   // 战机固定滚转矫正（让机身默认垂直朝上）
   // 当前素材在包内朝向接近反向，叠加 180 度后再微调
   // 启用贴图后重校：让机头默认朝屏幕上方
   var PLAYER_VISUAL_ROLL_FIX_DEG = 0;
+  // 自动校准后的最终偏移（用于修正特定素材仍有轻微偏角）
+  var PLAYER_VISUAL_CALIB_OFFSET_DEG = 0;
+  // 方向参数：只负责机头朝向（与平衡参数互不影响）
+  var PLAYER_VISUAL_FORCE_BASE_DEG = -15;
+  // 调角阶段先关闭自动校准叠加，避免与手动角互相抵消
+  var PLAYER_VISUAL_USE_AUTO_CALIB = false;
+  // 贴图层动态横滚强度：0=完全水平，仅保留基准朝向
+  var PLAYER_VISUAL_DYNAMIC_ROLL_GAIN = 0;
+  // 平衡参数：只负责左右高低（与方向参数互不影响）
+  // 正值抬右压左，负值抬左压右，建议范围 -0.35 ~ 0.35
+  var PLAYER_VISUAL_BALANCE_SHEAR = 0.40;
   var playerVisualAutoRollDeg = 0;
   // 启用战机贴图层作为主视觉，3D 机体仅作加载失败兜底
   var ENABLE_PLAYER_BILLBOARD = true;
@@ -540,7 +586,10 @@ function run() {
     halfW: gl.getUniformLocation(pBill, 'uHalfW'),
     halfH: gl.getUniformLocation(pBill, 'uHalfH'),
     mvp: gl.getUniformLocation(pBill, 'uMVP'),
-    tex: gl.getUniformLocation(pBill, 'uTex')
+    tex: gl.getUniformLocation(pBill, 'uTex'),
+    chromaOn: gl.getUniformLocation(pBill, 'uChromaOn'),
+    chromaKey: gl.getUniformLocation(pBill, 'uChromaKey'),
+    chromaThreshold: gl.getUniformLocation(pBill, 'uChromaThreshold')
   };
   var locHud = {
     pos: gl.getAttribLocation(pHud, 'aP'),
@@ -802,6 +851,49 @@ function run() {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   }
 
+  function scrubPlayerCyanMarker(im) {
+    if (!im || !im.width || !im.height || !wx.createOffscreenCanvas) return im;
+    var oc = wx.createOffscreenCanvas({ type: '2d', width: im.width, height: im.height });
+    oc.width = im.width;
+    oc.height = im.height;
+    var c2 = oc.getContext('2d');
+    if (!c2 || !c2.getImageData) return im;
+    c2.clearRect(0, 0, oc.width, oc.height);
+    c2.drawImage(im, 0, 0, oc.width, oc.height);
+    var img = c2.getImageData(0, 0, oc.width, oc.height);
+    var px = img.data;
+    var i;
+    for (i = 0; i < px.length; i += 4) {
+      var r = px[i];
+      var g = px[i + 1];
+      var b = px[i + 2];
+      var a = px[i + 3];
+      if (a < 8) continue;
+      // 去除素材中央常见的亮青色占位块（保留真实机体高光）
+      if (b > 150 && g > 125 && r < 95 && (b - r) > 80 && (g - r) > 55) {
+        px[i + 3] = 0;
+      }
+    }
+    // 兜底硬处理：清除战机贴图中央竖向占位块区域（真机上该块颜色可能被压缩失真）
+    var x0 = Math.floor(oc.width * 0.43);
+    var x1 = Math.ceil(oc.width * 0.57);
+    var y0 = Math.floor(oc.height * 0.24);
+    var y1 = Math.ceil(oc.height * 0.82);
+    var yy;
+    var xx;
+    for (yy = y0; yy < y1; yy++) {
+      for (xx = x0; xx < x1; xx++) {
+        var p = (yy * oc.width + xx) * 4;
+        // 仅清掉偏青/偏蓝区域，避免误伤机身主体
+        if (px[p + 2] > px[p] + 25 && px[p + 1] > px[p] + 12) {
+          px[p + 3] = 0;
+        }
+      }
+    }
+    c2.putImageData(img, 0, 0);
+    return oc;
+  }
+
   function calibratePlayerVisualBaseDeg(im) {
     if (!im || !im.width || !im.height || !wx.createOffscreenCanvas) return 0;
     var sw = im.width;
@@ -881,6 +973,48 @@ function run() {
     if (sumW < 1) return 0;
     var cx = sumX / sumW;
     var cy = sumY / sumW;
+    // 先尝试“喷口蓝焰法”推断机尾方向：对这类战机素材比几何轮廓更稳定
+    var engineW = 0;
+    var engineX = 0;
+    var engineY = 0;
+    for (i = 0; i < px.length; i += 4) {
+      var ew = pixelWeight(i);
+      if (ew <= 0) continue;
+      var br = px[i];
+      var bg = px[i + 1];
+      var bb = px[i + 2];
+      // 蓝焰/引擎常见特征：蓝通道显著高，且饱和度高
+      if (bb < 110) continue;
+      if (bb < br + 22 || bb < bg + 10) continue;
+      var cool = bb - (br + bg) * 0.5;
+      if (cool < 20) continue;
+      var ep = (i / 4) | 0;
+      x = ep % cw;
+      y = (ep / cw) | 0;
+      var weight = ew * (0.4 + Math.min(2.2, cool / 52));
+      engineW += weight;
+      engineX += x * weight;
+      engineY += y * weight;
+    }
+    if (engineW > sumW * 0.012) {
+      var ex = engineX / engineW;
+      var ey = engineY / engineW;
+      // forward = 机身中心 - 引擎中心（机头与喷口方向相反）
+      var fx = cx - ex;
+      var fy = cy - ey;
+      var fl = Math.sqrt(fx * fx + fy * fy);
+      if (fl > 4) {
+        fx /= fl;
+        fy /= fl;
+        var er = Math.atan2(-fx, -fy);
+        if (isFinite(er)) {
+          var ed = (er * 180) / Math.PI;
+          if (ed > 180) ed -= 360;
+          if (ed < -180) ed += 360;
+          return ed;
+        }
+      }
+    }
     var xx = 0;
     var yy = 0;
     var xy = 0;
@@ -943,8 +1077,9 @@ function run() {
     return deg;
   }
 
-  function getPlayerVisualRollRad() {
-    return ((PLAYER_VISUAL_ROLL_FIX_DEG + playerVisualAutoRollDeg) * Math.PI) / 180;
+  function getPlayerDirectionRollRad() {
+    var autoDeg = PLAYER_VISUAL_USE_AUTO_CALIB ? playerVisualAutoRollDeg : 0;
+    return ((PLAYER_VISUAL_FORCE_BASE_DEG + PLAYER_VISUAL_ROLL_FIX_DEG + autoDeg + PLAYER_VISUAL_CALIB_OFFSET_DEG) * Math.PI) / 180;
   }
 
   function loadPlayerAssetAt(listIndex) {
@@ -977,8 +1112,9 @@ function run() {
         gl.bindTexture(gl.TEXTURE_2D, playerTex);
         gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
         bindPlayerTextureParams();
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, im);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, scrubPlayerCyanMarker(im));
         playerVisualAutoRollDeg = calibratePlayerVisualBaseDeg(im);
+        if (!isFinite(playerVisualAutoRollDeg)) playerVisualAutoRollDeg = 0;
         playerLoaded = true;
         playerUsesProceduralTex = false;
         console.log('[3D] 战机精灵贴图:', basePath, iw, ih, 'autoRollDeg=', playerVisualAutoRollDeg.toFixed(2));
@@ -1428,7 +1564,7 @@ function run() {
     computePlayerSpriteNdc(playerNdc);
     var drawHw = PLAYER_VISUAL_FLIP_X ? -playerNdc.hw : playerNdc.hw;
     var drawHh = PLAYER_VISUAL_FLIP_Y ? -playerNdc.hh : playerNdc.hh;
-    var rollFix = getPlayerVisualRollRad();
+    var rollFix = getPlayerDirectionRollRad();
     gl.disable(gl.DEPTH_TEST);
     gl.depthMask(false);
     drawUiTexture(playerTex, playerNdc.tx, playerNdc.ty, drawHw, drawHh, rollFix);
@@ -2044,7 +2180,7 @@ var dragAnchorPlayerY = 0;
     mul4(out, base, tmp3);
   }
 
-  function billboardFacingCamera(cx, cy, cz, rollRad, outR, outU) {
+  function billboardFacingCamera(cx, cy, cz, directionRad, balanceShear, outR, outU) {
     var lx = CAM_EX - cx;
     var ly = CAM_EY - cy;
     var lz = CAM_EZ - cz;
@@ -2071,14 +2207,64 @@ var dragAnchorPlayerY = 0;
     var ux = ly * rz - lz * ry;
     var uy = lz * rx - lx * rz;
     var uz = lx * ry - ly * rx;
-    var cr = Math.cos(rollRad);
-    var sr = Math.sin(rollRad);
+    var cr = Math.cos(directionRad);
+    var sr = Math.sin(directionRad);
     var fvx = rx * cr + ux * sr;
     var fvy = ry * cr + uy * sr;
     var fvz = rz * cr + uz * sr;
     var fux = -rx * sr + ux * cr;
     var fuy = -ry * sr + uy * cr;
     var fuz = -rz * sr + uz * cr;
+    if (Math.abs(balanceShear) > 1e-6) {
+      fux += fvx * balanceShear;
+      fuy += fvy * balanceShear;
+      fuz += fvz * balanceShear;
+      var ul = Math.sqrt(fux * fux + fuy * fuy + fuz * fuz);
+      if (ul > 1e-6) {
+        fux /= ul;
+        fuy /= ul;
+        fuz /= ul;
+      }
+    }
+    outR[0] = fvx;
+    outR[1] = fvy;
+    outR[2] = fvz;
+    outU[0] = fux;
+    outU[1] = fuy;
+    outU[2] = fuz;
+  }
+
+  // 玩家战机使用“屏幕稳定”朝向基底，避免左右移动时因相机-物体向量变化产生视觉倾斜
+  function billboardFacingView(directionRad, balanceShear, outR, outU) {
+    var rx = view[0];
+    var ry = view[4];
+    var rz = view[8];
+    var ux = view[1];
+    var uy = view[5];
+    var uz = view[9];
+    var rl = Math.sqrt(rx * rx + ry * ry + rz * rz) || 1;
+    var ul = Math.sqrt(ux * ux + uy * uy + uz * uz) || 1;
+    rx /= rl; ry /= rl; rz /= rl;
+    ux /= ul; uy /= ul; uz /= ul;
+    var cr = Math.cos(directionRad);
+    var sr = Math.sin(directionRad);
+    var fvx = rx * cr + ux * sr;
+    var fvy = ry * cr + uy * sr;
+    var fvz = rz * cr + uz * sr;
+    var fux = -rx * sr + ux * cr;
+    var fuy = -ry * sr + uy * cr;
+    var fuz = -rz * sr + uz * cr;
+    if (Math.abs(balanceShear) > 1e-6) {
+      fux += fvx * balanceShear;
+      fuy += fvy * balanceShear;
+      fuz += fvz * balanceShear;
+      ul = Math.sqrt(fux * fux + fuy * fuy + fuz * fuz);
+      if (ul > 1e-6) {
+        fux /= ul;
+        fuy /= ul;
+        fuz /= ul;
+      }
+    }
     outR[0] = fvx;
     outR[1] = fvy;
     outR[2] = fvz;
@@ -2098,7 +2284,7 @@ var dragAnchorPlayerY = 0;
     mul4(model, tmp2, tmp3);
     mul4(model, tmp, model);
     // 缩小战机体积，减少遮挡并提升可视边界余量
-    scale4(tmp, 0.9 * zScale, 0.9 * zScale, 0.9 * zScale);
+    scale4(tmp, 0.45 * zScale, 0.45 * zScale, 0.45 * zScale);
     mul4(model, model, tmp);
 
     composePart(model, 0, 0, -0.02, 0.32, 0.17, 0.95, tmp3);
@@ -2131,15 +2317,13 @@ var dragAnchorPlayerY = 0;
     var zSpan = Math.max(0.08, PLAYER_Z_NEAR - PLAYER_Z_FAR);
     var z01 = Math.max(0, Math.min(1, (playerZ - PLAYER_Z_FAR) / zSpan));
     var rollRad =
-      playerBank * 0.14 +
-      Math.sin(nowMs * 0.003) * 0.01 +
-      (playerRollTrimDeg * Math.PI) / 180 +
-      getPlayerVisualRollRad();
+      (playerBank * 0.14 + Math.sin(nowMs * 0.003) * 0.01 + (playerRollTrimDeg * Math.PI) / 180) * PLAYER_VISUAL_DYNAMIC_ROLL_GAIN +
+      getPlayerDirectionRollRad();
     // 玩家战机前景优先，避免被大背景模型遮挡到“看不见”
     gl.disable(gl.DEPTH_TEST);
     if (ENABLE_PLAYER_BILLBOARD && playerLoaded) {
-      billboardFacingCamera(cx, cy, cz, rollRad, billRight, billUp);
-      var halfW = Math.max(0.92, playerUsesProceduralTex ? 1.0 : 0.96) * (0.72 + z01 * 0.62);
+      billboardFacingView(rollRad, PLAYER_VISUAL_BALANCE_SHEAR, billRight, billUp);
+      var halfW = Math.max(0.92, playerUsesProceduralTex ? 1.0 : 0.96) * (0.72 + z01 * 0.62) * 0.5;
       var halfH = halfW * playerImgAspect;
       gl.useProgram(pBill);
       gl.disable(gl.CULL_FACE);
@@ -2154,6 +2338,9 @@ var dragAnchorPlayerY = 0;
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, playerTex);
       gl.uniform1i(locBill.tex, 0);
+      gl.uniform1f(locBill.chromaOn, 1.0);
+      gl.uniform3f(locBill.chromaKey, 0.33, 0.86, 0.95);
+      gl.uniform1f(locBill.chromaThreshold, 0.28);
       gl.uniform3f(locBill.center, cx, cy, cz);
       gl.uniform3fv(locBill.right, billRight);
       gl.uniform3fv(locBill.up, billUp);
@@ -2171,21 +2358,7 @@ var dragAnchorPlayerY = 0;
     if (!ENABLE_PLAYER_BILLBOARD || !playerLoaded) {
       drawPlayerCubes(nowMs);
     }
-    // extra beacon glow so player is always locatable
-    translate4(model, cx, cy + 0.04, cz - 0.02);
-    scale4(tmp, 0.1 + Math.sin(nowMs * 0.012) * 0.014, 0.1 + Math.sin(nowMs * 0.012) * 0.014, 0.1);
-    mul4(tmp2, model, tmp);
-    drawMesh(bEnemySphere, nEnemySphere, ENEMY_EYE_COLORS[2], tmp2);
-    if (gameStarted) {
-      translate4(tmp, cx, cy, cz - 0.08);
-      rotateY4(tmp2, playerBank * 0.22 + Math.sin(nowMs * 0.003) * 0.03);
-      rotateZ4(tmp3, (playerRollTrimDeg * Math.PI) / 180);
-      mul4(model, tmp2, tmp3);
-      mul4(model, tmp, model);
-      scale4(tmp, 0.16, 0.09, 0.44);
-      mul4(tmp2, model, tmp);
-      drawMesh(bCube, nCube, C_SHIP_GLOW, tmp2);
-    }
+    // remove debug beacon/glow block: it appears as a cyan rectangle on top of the fighter texture
     gl.enable(gl.CULL_FACE);
     gl.enable(gl.DEPTH_TEST);
   }
@@ -2257,7 +2430,7 @@ var dragAnchorPlayerY = 0;
     if (!tex) {
       tex = enemyBallTextures.normal;
     }
-    billboardFacingCamera(e.x, e.y, e.z, 0, billRight, billUp);
+    billboardFacingCamera(e.x, e.y, e.z, 0, 0, billRight, billUp);
     gl.useProgram(pBill);
     gl.disable(gl.CULL_FACE);
     gl.enable(gl.BLEND);
@@ -2271,6 +2444,7 @@ var dragAnchorPlayerY = 0;
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.uniform1i(locBill.tex, 0);
+    gl.uniform1f(locBill.chromaOn, 0.0);
     gl.uniform3f(locBill.center, e.x, e.y, e.z);
     gl.uniform3fv(locBill.right, billRight);
     gl.uniform3fv(locBill.up, billUp);
@@ -2826,17 +3000,17 @@ var dragAnchorPlayerY = 0;
     var dv;
     if (gameStarted && !gameOver) {
       du =
-        Math.sin(bgPanT * 0.72) * 0.078 +
-        Math.sin(bgPanT * 0.27) * 0.042 +
-        Math.cos(bgPanT * 0.39) * 0.026 +
-        Math.sin(worldTravelX * 0.052) * 0.085 +
-        (playerY - PLAYER_Y_DEFAULT) * 0.022;
+        Math.sin(bgPanT * 0.86) * 0.094 +
+        Math.sin(bgPanT * 0.31) * 0.055 +
+        Math.cos(bgPanT * 0.46) * 0.032 +
+        Math.sin(worldTravelX * 0.068) * 0.118 +
+        (playerY - PLAYER_Y_DEFAULT) * 0.03;
       dv =
-        Math.cos(bgPanT * 0.62) * 0.086 +
-        Math.sin(bgPanT * 0.36) * 0.044 +
-        Math.sin(bgPanT * 0.18) * 0.03 +
-        (playerY - PLAYER_Y_DEFAULT) * 0.024 -
-        Math.cos(worldTravelX * 0.032) * 0.03;
+        Math.cos(bgPanT * 0.76) * 0.104 +
+        Math.sin(bgPanT * 0.43) * 0.058 +
+        Math.sin(bgPanT * 0.22) * 0.038 +
+        (playerY - PLAYER_Y_DEFAULT) * 0.034 -
+        Math.cos(worldTravelX * 0.044) * 0.044;
     } else {
       du = Math.sin(bgPanT * 0.32) * 0.02;
       dv = Math.cos(bgPanT * 0.24) * 0.016;
@@ -2881,7 +3055,7 @@ var dragAnchorPlayerY = 0;
       var half = (isBossBullet ? 0.15 : 0.11) * ep;
       var bulletTex = isBossBullet ? enemyBulletTexBoss : enemyBulletTexNormal;
       if (!bulletTex) continue;
-      billboardFacingCamera(eb.x, eb.y, eb.z, 0, billRight, billUp);
+      billboardFacingCamera(eb.x, eb.y, eb.z, 0, 0, billRight, billUp);
       gl.useProgram(pBill);
       gl.disable(gl.CULL_FACE);
       gl.enable(gl.BLEND);
@@ -2895,6 +3069,7 @@ var dragAnchorPlayerY = 0;
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, bulletTex);
       gl.uniform1i(locBill.tex, 0);
+      gl.uniform1f(locBill.chromaOn, 0.0);
       gl.uniform3f(locBill.center, eb.x, eb.y, eb.z);
       gl.uniform3fv(locBill.right, billRight);
       gl.uniform3fv(locBill.up, billUp);
@@ -2912,7 +3087,7 @@ var dragAnchorPlayerY = 0;
       var dHalf = 0.28 * dPulse;
       var dTex = dk === 'heal' ? powerupTexHeal : (dk === 'shield' ? powerupTexShield : powerupTexAtk);
       if (!dTex) continue;
-      billboardFacingCamera(drops[i].x, drops[i].y, drops[i].z, 0, billRight, billUp);
+      billboardFacingCamera(drops[i].x, drops[i].y, drops[i].z, 0, 0, billRight, billUp);
       gl.useProgram(pBill);
       gl.disable(gl.CULL_FACE);
       gl.enable(gl.BLEND);
@@ -2926,6 +3101,7 @@ var dragAnchorPlayerY = 0;
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, dTex);
       gl.uniform1i(locBill.tex, 0);
+      gl.uniform1f(locBill.chromaOn, 0.0);
       gl.uniform3f(locBill.center, drops[i].x, drops[i].y, drops[i].z);
       gl.uniform3fv(locBill.right, billRight);
       gl.uniform3fv(locBill.up, billUp);
