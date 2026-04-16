@@ -217,13 +217,18 @@ var VSH_MESH = [
   'attribute vec3 aPos;',
   'attribute vec3 aNor;',
   'uniform mat4 uMVP;',
+  'uniform mat4 uModel;',
   'uniform mat3 uN;',
-  'uniform vec3 uLight;',
+  'uniform mediump vec3 uLight;',
   'varying vec3 vShade;',
+  'varying vec3 vNor;',
+  'varying vec3 vWPos;',
   'void main(){',
   '  vec3 n = normalize(uN * aNor);',
   '  float d = max(dot(n, normalize(-uLight)), 0.2);',
   '  vShade = vec3(0.16 + d * 0.84);',
+  '  vNor = n;',
+  '  vWPos = (uModel * vec4(aPos, 1.0)).xyz;',
   '  gl_Position = uMVP * vec4(aPos, 1.0);',
   '}'
 ].join('');
@@ -231,18 +236,31 @@ var VSH_MESH = [
 var FSH_MESH = [
   'precision mediump float;',
   'varying vec3 vShade;',
+  'varying vec3 vNor;',
+  'varying vec3 vWPos;',
   'uniform vec3 uRgb;',
   'uniform float uEmit;',
   'uniform vec3 uHot;',
   'uniform float uAddBurst;',
+  'uniform vec3 uCam;',
+  'uniform mediump vec3 uLight;',
+  'uniform float uSpecPow;',
+  'uniform float uSpecStrength;',
+  'uniform float uRimStrength;',
   'void main(){',
   '  if (uAddBurst > 0.001) {',
   '    gl_FragColor = vec4(uHot * uAddBurst, 1.0);',
   '    return;',
   '  }',
+  '  vec3 n = normalize(vNor);',
+  '  vec3 viewDir = normalize(uCam - vWPos);',
+  '  vec3 halfV = normalize(normalize(-uLight) + viewDir);',
+  '  float spec = pow(max(dot(n, halfV), 0.0), max(1.0, uSpecPow)) * uSpecStrength;',
+  '  float rim = pow(1.0 - max(dot(n, viewDir), 0.0), 2.3) * uRimStrength;',
   '  vec3 lit = uRgb * vShade;',
   '  vec3 add = uHot * uEmit;',
-  '  gl_FragColor = vec4(min(lit + add, vec3(1.0)), 1.0);',
+  '  vec3 finalRgb = min(lit + add + vec3(spec) + uRgb * rim * 0.55, vec3(1.0));',
+  '  gl_FragColor = vec4(finalRgb, 1.0);',
   '}'
 ].join('');
 
@@ -280,12 +298,16 @@ var VSH_BG = [
 var FSH_BG = [
   'precision mediump float;',
   'varying vec2 vUV;',
-  'uniform sampler2D uTex;',
+  'uniform sampler2D uTexA;',
+  'uniform sampler2D uTexB;',
+  'uniform float uBlend;',
   'uniform float uMix;',
   'uniform vec2 uScroll;',
   'void main(){',
   '  vec2 uv = clamp(vUV + uScroll, vec2(0.002), vec2(0.998));',
-  '  vec3 tex = texture2D(uTex, uv).rgb;',
+  '  vec3 texA = texture2D(uTexA, uv).rgb;',
+  '  vec3 texB = texture2D(uTexB, uv).rgb;',
+  '  vec3 tex = mix(texA, texB, clamp(uBlend, 0.0, 1.0));',
   '  tex = clamp((tex - vec3(0.5)) * 1.16 + vec3(0.5), 0.0, 1.0);',
   '  vec3 tint = vec3(0.02, 0.04, 0.12);',
   '  gl_FragColor = vec4(mix(tint, tex, uMix), 1.0);',
@@ -333,9 +355,12 @@ var FSH_BILLBOARD = [
   'uniform sampler2D uTex;',
   'void main(){',
   '  vec4 c = texture2D(uTex, vUV);',
-  '  float a = c.a;',
-  '  if (a < 0.02 && dot(c.rgb, c.rgb) < 0.001) discard;',
-  '  if (a < 0.02) a = 1.0;',
+  '  vec2 p = vUV - vec2(0.5);',
+  '  float rr = dot(p, p);',
+  '  if (rr > 0.25) discard;',
+  '  float edge = smoothstep(0.25, 0.21, rr);',
+  '  float a = c.a * edge;',
+  '  if (a < 0.02) discard;',
   '  gl_FragColor = vec4(c.rgb, a);',
   '}'
 ].join('');
@@ -374,38 +399,66 @@ function makeBuffer(gl, arr, usage) {
 
 function run() {
   var canvas = wx.createCanvas();
-  var w = canvas.width;
-  var h = canvas.height;
-  var windowW = w;
-  var windowH = h;
+  var rawCanvasW = canvas.width;
+  var rawCanvasH = canvas.height;
+  var windowW = rawCanvasW;
+  var windowH = rawCanvasH;
+  var pixelRatio = 1;
   try {
     var winInfo = wx.getWindowInfo ? wx.getWindowInfo() : (wx.getSystemInfoSync ? wx.getSystemInfoSync() : null);
     if (winInfo) {
-      windowW = winInfo.windowWidth || winInfo.screenWidth || w;
-      windowH = winInfo.windowHeight || winInfo.screenHeight || h;
+      windowW = winInfo.windowWidth || winInfo.screenWidth || rawCanvasW;
+      windowH = winInfo.windowHeight || winInfo.screenHeight || rawCanvasH;
+      pixelRatio = winInfo.pixelRatio || pixelRatio;
     }
   } catch (e) {}
-  var PLAYER_Y_MIN = 0.08;
-  var PLAYER_Y_MAX = 0.92;
-  var PLAYER_Y_DEFAULT = 0.64;
-  // 前后移动范围（加大后在当前镜头下更容易感知）
-  var PLAYER_Z_NEAR = 1.3;
-  var PLAYER_Z_FAR = -3.6;
+  if (!isFinite(pixelRatio) || pixelRatio <= 0) {
+    pixelRatio = rawCanvasW > 0 && windowW > 0 ? rawCanvasW / windowW : 1;
+  }
+  pixelRatio = Math.max(1, Math.min(3, pixelRatio));
+  var renderW = Math.max(1, Math.round(windowW * pixelRatio));
+  var renderH = Math.max(1, Math.round(windowH * pixelRatio));
+  if (canvas.width !== renderW) canvas.width = renderW;
+  if (canvas.height !== renderH) canvas.height = renderH;
+  // 逻辑坐标使用窗口尺寸，渲染坐标使用高 DPI 画布尺寸
+  var w = windowW;
+  var h = windowH;
+  var uiScaleX = renderW / Math.max(1, w);
+  var uiScaleY = renderH / Math.max(1, h);
+  // Y 使用世界坐标范围（不是屏幕比例）
+  var PLAYER_Y_MIN = -2.0;
+  var PLAYER_Y_MAX = 2.0;
+  var PLAYER_Y_DEFAULT = 0.25;
+  // 屏幕内横向移动边界
+  var PLAYER_X_LIMIT = 4.5;
+  // 世界坐标无限移动（不再对 X/Y 做边界夹取）
+  // 相机注视点 Y：与机体对齐（原静止镜头下 centerY=0.25 对应 playerY≈0.64）
+  var CAM_LOOK_AT_Y = function(py) {
+    return py - 0.39;
+  };
+  // Z 仅保留稳定范围；当前控制模式下默认固定到 PLAYER_Z_DEFAULT
+  var PLAYER_Z_NEAR = 0.8;
+  var PLAYER_Z_FAR = -4.8;
+  // 相机前方安全上限（防止战机靠得太近被透视/裁剪看起来“消失”）
+  var PLAYER_Z_SAFE_MAX = 0.25;
   // 开局默认后撤到全景位，确保进入战斗无需点击即可看到战机完整轮廓
   var PLAYER_Z_DEFAULT = -2.7;
   // 贴图朝向修正：不同素材坐标系可能相反，可在此翻转
-  var PLAYER_VISUAL_FLIP_X = true;
-  var PLAYER_VISUAL_FLIP_Y = true;
+  var PLAYER_VISUAL_FLIP_X = false;
+  var PLAYER_VISUAL_FLIP_Y = false;
   // 战机固定滚转矫正（让机身默认垂直朝上）
   // 当前素材在包内朝向接近反向，叠加 180 度后再微调
-  var PLAYER_VISUAL_ROLL_FIX_DEG = 144;
-  // 贴图层在部分素材下会出现整块残影；默认关闭，仅使用稳定的 3D 机体
-  var ENABLE_PLAYER_BILLBOARD = false;
+  // 启用贴图后重校：让机头默认朝屏幕上方
+  var PLAYER_VISUAL_ROLL_FIX_DEG = 0;
+  var playerVisualAutoRollDeg = 0;
+  // 启用战机贴图层作为主视觉，3D 机体仅作加载失败兜底
+  var ENABLE_PLAYER_BILLBOARD = true;
   var gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
   if (!gl) {
     wx.showModal({ title: '3D 不可用', content: '当前设备无法创建 WebGL。', showCancel: false });
     return;
   }
+  gl.viewport(0, 0, renderW, renderH);
 
   var vsMesh = compile(gl, gl.VERTEX_SHADER, VSH_MESH);
   var fsMesh = compile(gl, gl.FRAGMENT_SHADER, FSH_MESH);
@@ -453,12 +506,17 @@ function run() {
     pos: gl.getAttribLocation(pMesh, 'aPos'),
     nor: gl.getAttribLocation(pMesh, 'aNor'),
     mvp: gl.getUniformLocation(pMesh, 'uMVP'),
+    model: gl.getUniformLocation(pMesh, 'uModel'),
     n: gl.getUniformLocation(pMesh, 'uN'),
     light: gl.getUniformLocation(pMesh, 'uLight'),
+    cam: gl.getUniformLocation(pMesh, 'uCam'),
     rgb: gl.getUniformLocation(pMesh, 'uRgb'),
     emit: gl.getUniformLocation(pMesh, 'uEmit'),
     hot: gl.getUniformLocation(pMesh, 'uHot'),
-    addBurst: gl.getUniformLocation(pMesh, 'uAddBurst')
+    addBurst: gl.getUniformLocation(pMesh, 'uAddBurst'),
+    specPow: gl.getUniformLocation(pMesh, 'uSpecPow'),
+    specStrength: gl.getUniformLocation(pMesh, 'uSpecStrength'),
+    rimStrength: gl.getUniformLocation(pMesh, 'uRimStrength')
   };
   var locStar = {
     pos: gl.getAttribLocation(pStar, 'aPos'),
@@ -467,7 +525,9 @@ function run() {
   var locBg = {
     pos: gl.getAttribLocation(pBg, 'aPos'),
     uv: gl.getAttribLocation(pBg, 'aUV'),
-    tex: gl.getUniformLocation(pBg, 'uTex'),
+    texA: gl.getUniformLocation(pBg, 'uTexA'),
+    texB: gl.getUniformLocation(pBg, 'uTexB'),
+    blend: gl.getUniformLocation(pBg, 'uBlend'),
     mix: gl.getUniformLocation(pBg, 'uMix'),
     scroll: gl.getUniformLocation(pBg, 'uScroll')
   };
@@ -528,20 +588,34 @@ function run() {
     1, 1, 1, 0
   ]);
   var bBg = makeBuffer(gl, bgQuad, gl.STATIC_DRAW);
-  var bgTex = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, bgTex);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, 1, 1, 0, gl.RGB, gl.UNSIGNED_BYTE, new Uint8Array([5, 8, 20]));
+  var bgTexA = gl.createTexture();
+  var bgTexB = gl.createTexture();
+  function initBgTexture(tex) {
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, 1, 1, 0, gl.RGB, gl.UNSIGNED_BYTE, new Uint8Array([5, 8, 20]));
+  }
+  initBgTexture(bgTexA);
+  initBgTexture(bgTexB);
   var bgLoaded = false;
+  var bgCurrentTex = 0;
+  var bgNextTex = 0;
+  var bgBlending = false;
+  var bgBlend = 1;
+  var bgBlendDuration = 0.55;
+  var bgLoadToken = 0;
   var homeBgFiles = ['01.jpg', '02.jpg', '03.jpg'];
   var battleBgFiles = ['01.png', '02.png', '03.png', '04.png'];
   var bgMode = 'home';
   var bgIndex = Math.floor(Math.random() * homeBgFiles.length);
   var bgChangeTimer = 0;
   var bgChangeInterval = 12;
+  var mapChunkCooldown = 0;
+  var lastMapChunkIx = 0;
+  var lastMapChunkIy = 0;
 
   function packageImagePathVariants(rel) {
     var r = rel.replace(/^\//, '');
@@ -593,32 +667,49 @@ function run() {
     attempt();
   }
 
-  function uploadBgFromImage(im, logTag) {
-    gl.bindTexture(gl.TEXTURE_2D, bgTex);
+  function getBgTexture(idx) {
+    return idx === 0 ? bgTexA : bgTexB;
+  }
+
+  function uploadBgFromImage(tex, im, logTag) {
+    gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, im);
-    bgLoaded = true;
     console.log('[3D] 背景贴图 OK', logTag || '', im.width, im.height);
   }
 
   function loadBgAtIndex(ix) {
-    bgLoaded = false;
+    var myToken = ++bgLoadToken;
     var list = bgMode === 'home' ? homeBgFiles : battleBgFiles;
     var folder = bgMode === 'home' ? 'assets/home/' : 'assets/background/';
     var name = list[ix % list.length];
     var rel = folder + name;
+    var incomingTex = bgLoaded ? (1 - bgCurrentTex) : bgCurrentTex;
     loadImageFromPackage(
       packageImagePathVariants(rel),
       function(im, tag) {
-        uploadBgFromImage(im, tag);
+        if (myToken !== bgLoadToken) return;
+        uploadBgFromImage(getBgTexture(incomingTex), im, tag);
+        if (!bgLoaded) {
+          bgCurrentTex = incomingTex;
+          bgNextTex = incomingTex;
+          bgBlend = 1;
+          bgBlending = false;
+          bgLoaded = true;
+          return;
+        }
+        bgNextTex = incomingTex;
+        bgBlend = 0;
+        bgBlending = true;
       },
       function() {
+        if (myToken !== bgLoadToken) return;
         console.error('[3D] 背景资源加载失败，已用纯色底。请确认', rel, '在游戏包内');
-        bgLoaded = false;
+        if (!bgLoaded) bgLoaded = false;
       }
     );
   }
@@ -695,6 +786,7 @@ function run() {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, PW, PH, 0, gl.RGBA, gl.UNSIGNED_BYTE, px);
     playerImgAspect = PH / PW;
+    playerVisualAutoRollDeg = 0;
     playerLoaded = true;
     playerUsesProceduralTex = true;
     console.log('[3D] 使用内置战机精灵贴图（请将 assets/player 下大图换成小尺寸 PNG 精灵，建议 ≤360 边长并带透明底）');
@@ -708,6 +800,151 @@ function run() {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  }
+
+  function calibratePlayerVisualBaseDeg(im) {
+    if (!im || !im.width || !im.height || !wx.createOffscreenCanvas) return 0;
+    var sw = im.width;
+    var sh = im.height;
+    var longEdge = Math.max(sw, sh);
+    var sampleScale = longEdge > 220 ? 220 / longEdge : 1;
+    var cw = Math.max(32, Math.round(sw * sampleScale));
+    var ch = Math.max(32, Math.round(sh * sampleScale));
+    var oc = wx.createOffscreenCanvas({ type: '2d', width: cw, height: ch });
+    oc.width = cw;
+    oc.height = ch;
+    var c2 = oc.getContext('2d');
+    if (!c2 || !c2.getImageData) return 0;
+    c2.clearRect(0, 0, cw, ch);
+    c2.drawImage(im, 0, 0, cw, ch);
+    var img = c2.getImageData(0, 0, cw, ch);
+    if (!img || !img.data) return 0;
+    var px = img.data;
+    var i;
+    var x;
+    var y;
+    var alphaSoftCount = 0;
+    for (i = 0; i < px.length; i += 4) {
+      if (px[i + 3] < 250) alphaSoftCount++;
+    }
+    var useBgSeg = alphaSoftCount < ((cw * ch) >> 7);
+    var bgR = 0;
+    var bgG = 0;
+    var bgB = 0;
+    var bgN = 0;
+    function sampleBg(ix, iy) {
+      var p = (iy * cw + ix) * 4;
+      bgR += px[p];
+      bgG += px[p + 1];
+      bgB += px[p + 2];
+      bgN++;
+    }
+    if (useBgSeg) {
+      var sx;
+      for (sx = 0; sx < cw; sx += Math.max(1, (cw / 16) | 0)) {
+        sampleBg(sx, 0);
+        sampleBg(sx, ch - 1);
+      }
+      for (sx = 0; sx < ch; sx += Math.max(1, (ch / 16) | 0)) {
+        sampleBg(0, sx);
+        sampleBg(cw - 1, sx);
+      }
+      if (bgN > 0) {
+        bgR /= bgN;
+        bgG /= bgN;
+        bgB /= bgN;
+      }
+    }
+    function pixelWeight(pIndex) {
+      var a = px[pIndex + 3];
+      if (!useBgSeg) return a >= 28 ? a : 0;
+      var dr = px[pIndex] - bgR;
+      var dg = px[pIndex + 1] - bgG;
+      var db = px[pIndex + 2] - bgB;
+      var dist = Math.sqrt(dr * dr + dg * dg + db * db);
+      if (dist < 34) return 0;
+      return Math.min(255, (dist - 28) * 3.2);
+    }
+    var sumW = 0;
+    var sumX = 0;
+    var sumY = 0;
+    for (i = 0; i < px.length; i += 4) {
+      var a = pixelWeight(i);
+      if (a <= 0) continue;
+      var p = (i / 4) | 0;
+      x = p % cw;
+      y = (p / cw) | 0;
+      sumW += a;
+      sumX += x * a;
+      sumY += y * a;
+    }
+    if (sumW < 1) return 0;
+    var cx = sumX / sumW;
+    var cy = sumY / sumW;
+    var xx = 0;
+    var yy = 0;
+    var xy = 0;
+    for (i = 0; i < px.length; i += 4) {
+      a = pixelWeight(i);
+      if (a <= 0) continue;
+      p = (i / 4) | 0;
+      x = p % cw;
+      y = (p / cw) | 0;
+      var dx = x - cx;
+      var dy = y - cy;
+      xx += a * dx * dx;
+      yy += a * dy * dy;
+      xy += a * dx * dy;
+    }
+    var axisA = 0.5 * Math.atan2(2 * xy, xx - yy);
+    var ax = Math.cos(axisA);
+    var ay = Math.sin(axisA);
+    var posSpread = 0;
+    var posW = 0;
+    var negSpread = 0;
+    var negW = 0;
+    var axisLen = Math.max(1, Math.sqrt(xx / sumW + yy / sumW));
+    var nearEnd = axisLen * 0.28;
+    for (i = 0; i < px.length; i += 4) {
+      a = pixelWeight(i);
+      if (a <= 0) continue;
+      p = (i / 4) | 0;
+      x = p % cw;
+      y = (p / cw) | 0;
+      dx = x - cx;
+      dy = y - cy;
+      var t = dx * ax + dy * ay;
+      var n = dx * -ay + dy * ax;
+      if (t > nearEnd) {
+        posSpread += a * n * n;
+        posW += a;
+      } else if (t < -nearEnd) {
+        negSpread += a * n * n;
+        negW += a;
+      }
+    }
+    var posWidth = posW > 0 ? Math.sqrt(posSpread / posW) : 9999;
+    var negWidth = negW > 0 ? Math.sqrt(negSpread / negW) : 9999;
+    // 细的一端通常是机头；据此确定“向前”方向
+    var nx = posWidth <= negWidth ? ax : -ax;
+    var ny = posWidth <= negWidth ? ay : -ay;
+    // 把机头旋到屏幕上方（0,-1）
+    var rad = Math.atan2(-nx, -ny);
+    if (!isFinite(rad)) return 0;
+    var deg = (rad * 180) / Math.PI;
+    // 抑制极端误判，避免出现突发大角度反转
+    if (deg > 180) deg -= 360;
+    if (deg < -180) deg += 360;
+    if (Math.abs(deg) > 135) deg = deg > 0 ? deg - 180 : deg + 180;
+    // 与上一帧静态基准一致性：避免在噪声图上跳转到错误象限
+    if (Math.abs(deg - playerVisualAutoRollDeg) > 95 && Math.abs((deg > 0 ? deg - 180 : deg + 180) - playerVisualAutoRollDeg) < 55) {
+      deg = deg > 0 ? deg - 180 : deg + 180;
+    }
+    return deg;
+  }
+
+  function getPlayerVisualRollRad() {
+    return ((PLAYER_VISUAL_ROLL_FIX_DEG + playerVisualAutoRollDeg) * Math.PI) / 180;
   }
 
   function loadPlayerAssetAt(listIndex) {
@@ -741,9 +978,10 @@ function run() {
         gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
         bindPlayerTextureParams();
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, im);
+        playerVisualAutoRollDeg = calibratePlayerVisualBaseDeg(im);
         playerLoaded = true;
         playerUsesProceduralTex = false;
-        console.log('[3D] 战机精灵贴图:', basePath, iw, ih);
+        console.log('[3D] 战机精灵贴图:', basePath, iw, ih, 'autoRollDeg=', playerVisualAutoRollDeg.toFixed(2));
       },
       function() {
         if (finished) return;
@@ -794,6 +1032,7 @@ function run() {
   var invVp = new Float32Array(16);
   var rayP0 = new Float32Array(4);
   var rayP1 = new Float32Array(4);
+  var playerClip = new Float32Array(4);
   var bulletSpawnXY = new Float32Array(2);
   var playerNdc = { tx: 0, ty: 0, hh: 0, hw: 0 };
   var BULLET_SPAWN_Z = -0.46;
@@ -821,6 +1060,27 @@ function run() {
   var C_BULLET_PWR_HOT = new Float32Array([1.0, 0.35, 0.95]);
   var C_BULLET_WHITE = new Float32Array([1.0, 1.0, 1.0]);
   var C_MUZZLE_HOT = new Float32Array([0.55, 0.95, 1.0]);
+  function rgbFromHex(hex) {
+    var s = (hex || '#000000').replace('#', '');
+    if (s.length !== 6) return new Float32Array([0, 0, 0]);
+    var r = parseInt(s.slice(0, 2), 16) / 255;
+    var g = parseInt(s.slice(2, 4), 16) / 255;
+    var b = parseInt(s.slice(4, 6), 16) / 255;
+    return new Float32Array([r, g, b]);
+  }
+  var ENEMY_TYPE_CONFIGS = [
+    { id: 'normal', highlight: rgbFromHex('#B3E5FC'), mid: rgbFromHex('#4FC3F7'), edge: rgbFromHex('#0288D1'), eye: rgbFromHex('#E3F2FD') },
+    { id: 'fast', highlight: rgbFromHex('#FFE0B2'), mid: rgbFromHex('#FF9800'), edge: rgbFromHex('#E65100'), eye: rgbFromHex('#FFF3E0') },
+    { id: 'zigzag', highlight: rgbFromHex('#F3E5F5'), mid: rgbFromHex('#CE93D8'), edge: rgbFromHex('#7B1FA2'), eye: rgbFromHex('#F8EAFB') },
+    { id: 'tough', highlight: rgbFromHex('#FFE0B2'), mid: rgbFromHex('#EF6C00'), edge: rgbFromHex('#BF360C'), eye: rgbFromHex('#FFF2DF') }
+  ];
+  var ENEMY_BOSS_CONFIG = {
+    id: 'boss',
+    highlight: rgbFromHex('#FFEBEE'),
+    mid: rgbFromHex('#FF1744'),
+    edge: rgbFromHex('#7F0000'),
+    eye: rgbFromHex('#FFFFFF')
+  };
   // Chapter 1 enemy visual set: samurai-style drones (mechanical, non-human)
   var ENEMY_COLORS = [
     new Float32Array([0.86, 0.18, 0.2]),   // crimson armor
@@ -843,6 +1103,7 @@ function run() {
   var playerX = 0;
   var targetPlayerX = 0;
   var playerY = PLAYER_Y_DEFAULT;
+  var targetPlayerY = PLAYER_Y_DEFAULT;
   var playerZ = PLAYER_Z_DEFAULT;
   var targetPlayerZ = PLAYER_Z_DEFAULT;
   var playerBank = 0;
@@ -855,20 +1116,37 @@ function run() {
   var fireT = 0;
   var tauntCooldown = 0;
   var powerTimer = 0;
+  var bulletLevel = 1;
+  var shieldTimer = 0;
   var combo = 0;
   var comboTimer = 0;
   var score = 0;
   var needScore = 35;
-  var hp = 5;
+  var hp = 7;
+  var MAX_HP = 7;
+  var bossActive = false;
+  var bossSpawnScore = 28;
+  var bossDefeated = false;
+  var bossShootCycle = 0;
+  var drops = [];
+  var dropSpawnT = 0;
+  var enemyBallTextures = {};
+  var enemyBulletTexNormal = null;
+  var enemyBulletTexBoss = null;
+  var powerupTexHeal = null;
+  var powerupTexAtk = null;
+  var powerupTexShield = null;
+  var enemyBarPos = [0, 0];
   // 机身平衡微调（3D 下可稳定调平）
   // roll: 正值右高左低，负值左高右低（建议范围 -5 ~ 5）
-  var playerRollTrimDeg = 0.8;
+  var playerRollTrimDeg = 0;
   // 机翼高度差：正值抬右压左，负值抬左压右
-  var playerWingBalanceY = 0.012;
+  var playerWingBalanceY = 0;
+  var worldTravelX = 0;
   var gameOver = false;
   var gameStarted = false;
   var startAt = Date.now();
-  var duration = 50;
+  var duration = 90;
   var endedShown = false;
   var paused = false;
   var enemyTaunts = [
@@ -910,13 +1188,13 @@ function run() {
       q.push(ax, ay, r, g, b, a, bx, ay, r, g, b, a, ax, by, r, g, b, a);
       q.push(ax, by, r, g, b, a, bx, ay, r, g, b, a, bx, by, r, g, b, a);
     }
-    var x0 = (wi - 78) / wi * 2 - 1;
-    var x1 = (wi - 6) / wi * 2 - 1;
+    var x0 = (wi - 52) / wi * 2 - 1;
+    var x1 = (wi - 12) / wi * 2 - 1;
     var yTop = 1 - (10 / hi) * 2;
-    var yBot = 1 - (78 / hi) * 2;
+    var yBot = 1 - (52 / hi) * 2;
     quad(x0, yBot, x1, yTop, 0.1, 0.12, 0.22, 0.82);
     var mx = (x0 + x1) / 2;
-    var bw = (5 / wi) * 2;
+    var bw = (3 / wi) * 2;
     var bh = (yTop - yBot) * 0.42;
     var my = (yTop + yBot) / 2;
     quad(mx - bw * 3.2, my - bh / 2, mx - bw * 1.2, my + bh / 2, 0.92, 0.93, 1, 0.96);
@@ -968,12 +1246,12 @@ function run() {
     ctx.lineWidth = 4;
     ctx.strokeStyle = 'rgba(12,18,28,0.9)';
     ctx.fillStyle = 'rgba(242,246,255,0.98)';
-    ctx.font = 'bold 46px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.font = 'bold 46px sans-serif';
     ctx.strokeText('3D 随机闯关', 40, 28);
     ctx.fillText('3D 随机闯关', 40, 28);
-    ctx.font = '30px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.font = '30px sans-serif';
     ctx.fillStyle = 'rgba(212,222,244,0.9)';
-    ctx.font = '24px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.font = '24px sans-serif';
     ctx.fillStyle = 'rgba(184,196,224,0.88)';
 
     ctx.strokeStyle = 'rgba(255,255,255,0.25)';
@@ -984,11 +1262,11 @@ function run() {
     ctx.stroke();
 
     ctx.fillStyle = 'rgba(255,220,170,0.98)';
-    ctx.font = 'bold 38px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.font = 'bold 38px sans-serif';
     ctx.strokeText('游戏已暂停', 40, 338);
     ctx.fillText('游戏已暂停', 40, 338);
     ctx.fillStyle = 'rgba(218,226,248,0.94)';
-    ctx.font = '30px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.font = '30px sans-serif';
     ctx.strokeText('轻触屏幕任意处继续', 40, 398);
     ctx.fillText('轻触屏幕任意处继续', 40, 398);
 
@@ -1043,7 +1321,7 @@ function run() {
     ctx.shadowOffsetY = 2;
     ctx.lineWidth = 4;
     ctx.strokeStyle = 'rgba(10,16,28,0.9)';
-    ctx.font = 'bold ' + fontPx + 'px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.font = 'bold ' + fontPx + 'px sans-serif';
     ctx.fillStyle = textColor;
     ctx.strokeText(text, wPx * 0.5, hPx * 0.52);
     ctx.fillText(text, wPx * 0.5, hPx * 0.52);
@@ -1150,7 +1428,7 @@ function run() {
     computePlayerSpriteNdc(playerNdc);
     var drawHw = PLAYER_VISUAL_FLIP_X ? -playerNdc.hw : playerNdc.hw;
     var drawHh = PLAYER_VISUAL_FLIP_Y ? -playerNdc.hh : playerNdc.hh;
-    var rollFix = (PLAYER_VISUAL_ROLL_FIX_DEG * Math.PI) / 180;
+    var rollFix = getPlayerVisualRollRad();
     gl.disable(gl.DEPTH_TEST);
     gl.depthMask(false);
     drawUiTexture(playerTex, playerNdc.tx, playerNdc.ty, drawHw, drawHh, rollFix);
@@ -1159,32 +1437,245 @@ function run() {
     gl.useProgram(pMesh);
   }
 
+  function rgbToCss(rgb) {
+    var rr = Math.max(0, Math.min(255, Math.round((rgb[0] || 0) * 255)));
+    var gg = Math.max(0, Math.min(255, Math.round((rgb[1] || 0) * 255)));
+    var bb = Math.max(0, Math.min(255, Math.round((rgb[2] || 0) * 255)));
+    return 'rgb(' + rr + ',' + gg + ',' + bb + ')';
+  }
+
+  function buildEnemyBallTexture(cfg, key, isBoss) {
+    var s = isBoss ? 320 : 220;
+    var oc = wx.createOffscreenCanvas
+      ? wx.createOffscreenCanvas({ type: '2d', width: s, height: s })
+      : wx.createCanvas();
+    oc.width = s;
+    oc.height = s;
+    var c2 = oc.getContext('2d');
+    if (!c2) return;
+    var cx = s * 0.5;
+    var cy = s * 0.5;
+    var r = s * 0.46;
+    c2.clearRect(0, 0, s, s);
+    c2.save();
+    c2.shadowColor = rgbToCss(cfg.mid);
+    c2.shadowBlur = isBoss ? 40 : 18;
+    var grad = c2.createRadialGradient(cx - r * 0.25, cy - r * 0.25, r * 0.05, cx, cy, r);
+    grad.addColorStop(0, rgbToCss(cfg.highlight));
+    grad.addColorStop(isBoss ? 0.2 : 0.35, rgbToCss(cfg.highlight));
+    grad.addColorStop(0.55, rgbToCss(cfg.mid));
+    grad.addColorStop(1, rgbToCss(cfg.edge));
+    c2.fillStyle = grad;
+    c2.beginPath();
+    c2.arc(cx, cy, r, 0, Math.PI * 2);
+    c2.fill();
+    c2.shadowBlur = 0;
+    c2.strokeStyle = 'rgba(255,255,255,0.24)';
+    c2.lineWidth = isBoss ? 4 : 2;
+    c2.beginPath();
+    c2.arc(cx - r * 0.14, cy - r * 0.14, r * 0.45, 0, Math.PI * 2);
+    c2.stroke();
+    c2.strokeStyle = 'rgba(0,0,0,0.16)';
+    c2.lineWidth = isBoss ? 3 : 1.5;
+    c2.beginPath();
+    c2.arc(cx, cy, r * 0.68, 0, Math.PI * 2);
+    c2.stroke();
+    c2.fillStyle = '#FFFFFF';
+    c2.beginPath();
+    c2.arc(cx - r * 0.2, cy - r * 0.1, r * 0.12, 0, Math.PI * 2);
+    c2.fill();
+    c2.beginPath();
+    c2.arc(cx + r * 0.2, cy - r * 0.1, r * 0.12, 0, Math.PI * 2);
+    c2.fill();
+    c2.fillStyle = '#111';
+    c2.beginPath();
+    c2.arc(cx - r * 0.18, cy - r * 0.08, r * 0.06, 0, Math.PI * 2);
+    c2.fill();
+    c2.beginPath();
+    c2.arc(cx + r * 0.22, cy - r * 0.08, r * 0.06, 0, Math.PI * 2);
+    c2.fill();
+    c2.strokeStyle = '#000';
+    c2.lineWidth = isBoss ? 4 : 2;
+    c2.beginPath();
+    c2.arc(cx, cy + r * 0.14, r * 0.14, 0, Math.PI);
+    c2.stroke();
+    c2.restore();
+
+    var tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, oc);
+    enemyBallTextures[key] = tex;
+  }
+
+  function buildEnemyBallTextures() {
+    var i;
+    for (i = 0; i < ENEMY_TYPE_CONFIGS.length; i++) {
+      buildEnemyBallTexture(ENEMY_TYPE_CONFIGS[i], ENEMY_TYPE_CONFIGS[i].id, false);
+    }
+    buildEnemyBallTexture(ENEMY_BOSS_CONFIG, 'boss', true);
+  }
+
+  function buildEnemyBulletTexture(stops) {
+    var s = 96;
+    var oc = wx.createOffscreenCanvas
+      ? wx.createOffscreenCanvas({ type: '2d', width: s, height: s })
+      : wx.createCanvas();
+    oc.width = s;
+    oc.height = s;
+    var c2 = oc.getContext('2d');
+    if (!c2) return null;
+    var cx = s * 0.5;
+    var cy = s * 0.5;
+    var r = s * 0.24;
+    c2.clearRect(0, 0, s, s);
+    var glow = c2.createRadialGradient(cx, cy, 0, cx, cy, r * 3.0);
+    glow.addColorStop(0, stops.glow0);
+    glow.addColorStop(0.5, stops.glow1);
+    glow.addColorStop(1, 'rgba(0,0,0,0)');
+    c2.fillStyle = glow;
+    c2.beginPath();
+    c2.arc(cx, cy, r * 3.0, 0, Math.PI * 2);
+    c2.fill();
+    var core = c2.createRadialGradient(cx, cy, 0, cx, cy, r);
+    core.addColorStop(0, '#FFFFFF');
+    core.addColorStop(0.4, stops.mid);
+    core.addColorStop(1, stops.edge);
+    c2.fillStyle = core;
+    c2.beginPath();
+    c2.arc(cx, cy, r, 0, Math.PI * 2);
+    c2.fill();
+
+    var tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, oc);
+    return tex;
+  }
+
+  function buildEnemyBulletTextures() {
+    enemyBulletTexNormal = buildEnemyBulletTexture({
+      glow0: 'rgba(255,50,50,0.42)',
+      glow1: 'rgba(255,20,20,0.16)',
+      mid: '#FF4444',
+      edge: '#CC0000'
+    });
+    enemyBulletTexBoss = buildEnemyBulletTexture({
+      glow0: 'rgba(255,120,255,0.5)',
+      glow1: 'rgba(255,40,180,0.2)',
+      mid: '#FF5EC8',
+      edge: '#9C27B0'
+    });
+  }
+
+  function buildPowerupTexture(kind) {
+    var s = 196;
+    var oc = wx.createOffscreenCanvas
+      ? wx.createOffscreenCanvas({ type: '2d', width: s, height: s })
+      : wx.createCanvas();
+    oc.width = s;
+    oc.height = s;
+    var c2 = oc.getContext('2d');
+    if (!c2) return null;
+    var cx = s * 0.5;
+    var cy = s * 0.44;
+    var baseR = s * 0.18;
+    var cfg =
+      kind === 'heal'
+        ? { glow: 'rgba(255,90,90,0.34)', mid: '#FF6B6B', edge: '#D84343', icon: '+', txt: '回血' }
+        : kind === 'shield'
+          ? { glow: 'rgba(120,190,255,0.34)', mid: '#64B5F6', edge: '#2A75C9', icon: 'S', txt: '护盾' }
+          : { glow: 'rgba(255,210,80,0.34)', mid: '#FFD54F', edge: '#E69A00', icon: 'A', txt: '加攻' };
+    c2.clearRect(0, 0, s, s);
+    var glow = c2.createRadialGradient(cx, cy, 0, cx, cy, baseR * 2.6);
+    glow.addColorStop(0, cfg.glow);
+    glow.addColorStop(1, 'rgba(0,0,0,0)');
+    c2.fillStyle = glow;
+    c2.beginPath();
+    c2.arc(cx, cy, baseR * 2.6, 0, Math.PI * 2);
+    c2.fill();
+    var core = c2.createRadialGradient(cx - baseR * 0.25, cy - baseR * 0.25, baseR * 0.1, cx, cy, baseR);
+    core.addColorStop(0, '#FFFFFF');
+    core.addColorStop(0.45, cfg.mid);
+    core.addColorStop(1, cfg.edge);
+    c2.fillStyle = core;
+    c2.beginPath();
+    c2.arc(cx, cy, baseR, 0, Math.PI * 2);
+    c2.fill();
+    c2.strokeStyle = 'rgba(255,255,255,0.38)';
+    c2.lineWidth = 2;
+    c2.beginPath();
+    c2.arc(cx - baseR * 0.16, cy - baseR * 0.16, baseR * 0.42, 0, Math.PI * 2);
+    c2.stroke();
+    c2.fillStyle = '#FFFFFF';
+    c2.font = 'bold 36px sans-serif';
+    c2.textAlign = 'center';
+    c2.textBaseline = 'middle';
+    c2.fillText(cfg.icon, cx, cy + 1);
+    c2.fillStyle = cfg.mid;
+    c2.font = 'bold 20px sans-serif';
+    c2.fillText(cfg.txt, cx, cy + baseR + 22);
+
+    var tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, oc);
+    return tex;
+  }
+
+  function buildPowerupTextures() {
+    powerupTexHeal = buildPowerupTexture('heal');
+    powerupTexAtk = buildPowerupTexture('atk');
+    powerupTexShield = buildPowerupTexture('shield');
+  }
+
   buildUiAtlasTexture();
   buildHomeButtonLabelTextures();
+  buildEnemyBallTextures();
+  buildEnemyBulletTextures();
+  buildPowerupTextures();
 
   function spawnEnemy() {
+    if (bossActive) return;
     var progress = gameStarted ? Math.min(1, score / needScore) : 0;
     var hasTaunt = Math.random() < 0.34;
     spawnCount++;
     var isElite = spawnCount % 8 === 0;
-    var enemyRadius = (isElite ? 0.56 : 0.42) + Math.random() * (isElite ? 0.08 : 0.06);
-    var hpBase = isElite ? 4 : 1;
+    var enemyRadius = (isElite ? 0.72 : 0.56) + Math.random() * (isElite ? 0.12 : 0.1);
+    var hpBase = isElite ? 3 : 1;
+    var typeCfg = ENEMY_TYPE_CONFIGS[(Math.random() * ENEMY_TYPE_CONFIGS.length) | 0];
     enemies.push({
-      x: (Math.random() * 2 - 1) * 2.75,
+      x: playerX + (Math.random() * 2 - 1) * 3.0,
       z: -10 - Math.random() * 2.2,
-      y: 0.27 + Math.random() * 0.18,
+      y: playerY + (Math.random() * 2 - 1) * 0.45 + 0.06,
       speed: (isElite ? 2.2 : 2.7) + progress * (isElite ? 1.5 : 2.1) + Math.random() * 1.1,
       phase: Math.random() * Math.PI * 2,
       gait: Math.random() * Math.PI * 2,
       shootT: Math.random() * 0.9,
-      shootInterval: (isElite ? 0.62 : 0.95) + Math.random() * (isElite ? 0.32 : 0.65),
+      shootInterval: (isElite ? 0.8 : 1.05) + Math.random() * (isElite ? 0.38 : 0.7),
       r: enemyRadius,
       hp: hpBase,
       hpMax: hpBase,
       elite: isElite,
-      color: ENEMY_COLORS[(Math.random() * ENEMY_COLORS.length) | 0],
-      maskColor: ENEMY_MASK_COLORS[(Math.random() * ENEMY_MASK_COLORS.length) | 0],
-      eyeColor: ENEMY_EYE_COLORS[(Math.random() * ENEMY_EYE_COLORS.length) | 0],
+      enemyType: typeCfg.id,
+      color: typeCfg.mid,
+      maskColor: typeCfg.edge,
+      eyeColor: typeCfg.eye,
+      highlightColor: typeCfg.highlight,
+      midColor: typeCfg.mid,
+      edgeColor: typeCfg.edge,
       flashT: 0,
       taunt: hasTaunt ? enemyTaunts[(Math.random() * enemyTaunts.length) | 0] : ''
     });
@@ -1194,20 +1685,118 @@ function run() {
     }
   }
 
+  function spawnBoss() {
+    enemies.push({
+      x: playerX,
+      y: playerY + 0.32,
+      z: -12.5,
+      speed: 1.45,
+      phase: 0,
+      gait: 0,
+      shootT: 0,
+      shootInterval: 0.55,
+      r: 2.25,
+      hp: 140,
+      hpMax: 140,
+      elite: true,
+      boss: true,
+      color: new Float32Array([0.45, 0.12, 0.8]),
+      maskColor: rgbFromHex('#8E0000'),
+      eyeColor: rgbFromHex('#FFEBEE'),
+      highlightColor: rgbFromHex('#FFEBEE'),
+      midColor: rgbFromHex('#FF1744'),
+      edgeColor: rgbFromHex('#7F0000'),
+      flashT: 0,
+      taunt: 'Boss 入场：深渊母舰'
+    });
+    bossActive = true;
+    bossShootCycle = 0;
+    wx.showToast({ title: 'Boss 出现！', icon: 'none', duration: 900 });
+  }
+
+  function spawnDrop(x, y, z, kind) {
+    drops.push({
+      x: x,
+      y: y,
+      z: z,
+      kind: kind,
+      life: 12.0,
+      phase: Math.random() * Math.PI * 2
+    });
+    if (drops.length > 18) drops.splice(0, drops.length - 18);
+  }
+
+  function maybeDropFromEnemy(e) {
+    if (e && e.boss) {
+      spawnDrop(e.x, e.y, e.z, 'atk');
+      spawnDrop(e.x + 0.35, e.y, e.z - 0.2, 'heal');
+      spawnDrop(e.x - 0.35, e.y, e.z - 0.2, 'shield');
+      return;
+    }
+    var r = Math.random();
+    if (r < 0.34) spawnDrop(e.x, e.y, e.z, 'atk');
+    else if (r < 0.5) spawnDrop(e.x, e.y, e.z, 'heal');
+    else if (r < 0.64) spawnDrop(e.x, e.y, e.z, 'shield');
+  }
+
+  function applyDrop(kind) {
+    if (kind === 'atk') {
+      powerTimer = Math.max(powerTimer, 0) + 5.5;
+      bulletLevel = Math.min(5, bulletLevel + 1);
+      wx.showToast({ title: '火力升级 Lv.' + bulletLevel, icon: 'none', duration: 650 });
+    } else if (kind === 'heal') {
+      hp = Math.min(MAX_HP, hp + 1);
+      wx.showToast({ title: '生命 +1', icon: 'none', duration: 500 });
+    } else if (kind === 'shield') {
+      shieldTimer = Math.max(shieldTimer, 0) + 5.5;
+      wx.showToast({ title: '护盾 +5.5s', icon: 'none', duration: 500 });
+    }
+  }
+
+  function chooseAimTarget(x, y, z) {
+    var best = null;
+    var bestScore = 1e9;
+    var i;
+    for (i = 0; i < enemies.length; i++) {
+      var e = enemies[i];
+      var dx = e.x - x;
+      var dy = e.y - y;
+      var dz = e.z - z;
+      if (dz > 1.5) continue;
+      var threat = e.boss ? -1.1 : (e.elite ? -0.35 : 0);
+      var distScore = dx * dx * 1.25 + dy * dy + dz * dz * 0.25 + threat;
+      if (distScore < bestScore) {
+        bestScore = distScore;
+        best = e;
+      }
+    }
+    return best;
+  }
+
   function readTouchClientPos(touch) {
-    // 优先使用本地坐标 x/y（模拟器鼠标事件最稳定）
-    var x = touch.x;
-    if (x === undefined || x === null) x = touch.clientX;
+    // 真机优先使用窗口坐标系字段；touch.x/y 为相对 canvas 左上角，需换算到窗口
+    var x = touch.clientX;
     if (x === undefined || x === null) x = touch.pageX;
     if (x === undefined || x === null) x = touch.screenX;
     if (x === undefined || x === null) x = touch.rawX;
+    var xFromCanvas = false;
+    if (x === undefined || x === null) {
+      x = touch.x;
+      xFromCanvas = x !== undefined && x !== null;
+    }
     if (x === undefined || x === null) x = 0;
-    var y = touch.y;
-    if (y === undefined || y === null) y = touch.clientY;
+    var y = touch.clientY;
     if (y === undefined || y === null) y = touch.pageY;
     if (y === undefined || y === null) y = touch.screenY;
     if (y === undefined || y === null) y = touch.rawY;
+    var yFromCanvas = false;
+    if (y === undefined || y === null) {
+      y = touch.y;
+      yFromCanvas = y !== undefined && y !== null;
+    }
     if (y === undefined || y === null) y = h * 0.5;
+    if (xFromCanvas && renderW > 0) x = x * (windowW / renderW);
+    if (yFromCanvas && renderH > 0) y = y * (windowH / renderH);
     return { x: x, y: y };
   }
 
@@ -1228,9 +1817,7 @@ function run() {
     // 兼容模拟器可能返回 canvas 像素坐标（通常大于 window 坐标）
     if (x > inputW * 1.5 && w > 0) x = (x / w) * inputW;
     if (y > inputH * 1.5 && h > 0) y = (y / h) * inputH;
-    // 兼容比例坐标
-    if (x >= 0 && x <= 1) x = x * inputW;
-    if (y >= 0 && y <= 1) y = y * inputH;
+    // 禁止把 [0,1] 像素误判为「归一化坐标」：例如 clientY===1 会被当成 y=1 再乘满屏高度，战机瞬间贴底
     if (!isFinite(x) || !isFinite(y)) return null;
     return {
       x: Math.max(0, Math.min(inputW, x)),
@@ -1238,36 +1825,100 @@ function run() {
     };
   }
 
+  function projectNdcX(x, y, z) {
+    var cx = vp[0] * x + vp[4] * y + vp[8] * z + vp[12];
+    var cw = vp[3] * x + vp[7] * y + vp[11] * z + vp[15];
+    if (!isFinite(cx) || !isFinite(cw) || Math.abs(cw) < 1e-5) return null;
+    return cx / cw;
+  }
+
+  function projectScreenPos(out, x, y, z) {
+    var cx = vp[0] * x + vp[4] * y + vp[8] * z + vp[12];
+    var cy = vp[1] * x + vp[5] * y + vp[9] * z + vp[13];
+    var cw = vp[3] * x + vp[7] * y + vp[11] * z + vp[15];
+    if (!isFinite(cx) || !isFinite(cy) || !isFinite(cw) || Math.abs(cw) < 1e-5) return false;
+    var ndcX = cx / cw;
+    var ndcY = cy / cw;
+    if (ndcX < -1.2 || ndcX > 1.2 || ndcY < -1.2 || ndcY > 1.2) return false;
+    out[0] = (ndcX * 0.5 + 0.5) * renderW;
+    out[1] = (ndcY * 0.5 + 0.5) * renderH;
+    return true;
+  }
+
+  function clampPlayerXToScreen(px, py, pz) {
+    var hardMin = -PLAYER_X_LIMIT;
+    var hardMax = PLAYER_X_LIMIT;
+    var edgeNdc = 0.82; // 给战机体积预留边距，避免机翼出屏
+    var lLo = hardMin;
+    var lHi = hardMax;
+    var i;
+    for (i = 0; i < 14; i++) {
+      var mxL = (lLo + lHi) * 0.5;
+      var ndcL = projectNdcX(mxL, py, pz);
+      if (ndcL === null || ndcL < -edgeNdc) {
+        lLo = mxL;
+      } else {
+        lHi = mxL;
+      }
+    }
+    var minVis = lLo;
+    var rLo = hardMin;
+    var rHi = hardMax;
+    for (i = 0; i < 14; i++) {
+      var mxR = (rLo + rHi) * 0.5;
+      var ndcR = projectNdcX(mxR, py, pz);
+      if (ndcR === null || ndcR > edgeNdc) {
+        rHi = mxR;
+      } else {
+        rLo = mxR;
+      }
+    }
+    var maxVis = rLo;
+    if (!isFinite(minVis) || !isFinite(maxVis) || minVis > maxVis) {
+      return Math.max(-PLAYER_X_LIMIT, Math.min(PLAYER_X_LIMIT, px));
+    }
+    return Math.max(minVis, Math.min(maxVis, px));
+  }
+
   var pointerDragging = false;
-  var lastPointerX = 0;
-  var lastPointerY = 0;
+  var pointerMoved = false;
+  var pointerStartX = 0;
+  var pointerStartY = 0;
+var dragAnchorPlayerX = 0;
+var dragAnchorPlayerY = 0;
   var _lastPointerDebugTs = 0;
+  var DRAG_START_THRESHOLD_PX = 8;
+
+  function setTargetsFromPointer(np, inputW, inputH) {
+    // 相对拖动：避免首帧坐标异常导致“按下即触底/飞出屏幕”
+    var dx = np.x - pointerStartX;
+    var dy = np.y - pointerStartY;
+    var nextX = dragAnchorPlayerX + (dx / inputW) * 8.0;
+    var nextY = dragAnchorPlayerY - (dy / inputH) * 3.0;
+    targetPlayerX = Math.max(-PLAYER_X_LIMIT, Math.min(PLAYER_X_LIMIT, nextX));
+    targetPlayerY = Math.max(PLAYER_Y_MIN, Math.min(PLAYER_Y_MAX, nextY));
+    targetPlayerZ = PLAYER_Z_DEFAULT;
+  }
 
   function updatePlayerTargetFromPointer(p) {
     var np = normalizePointerToWindow(p);
     if (!np) return;
     var inputW = Math.max(1, windowW);
     var inputH = Math.max(1, windowH);
-    if (!pointerDragging) {
-      // 首帧仅建立拖动锚点，避免点击瞬移导致“战机消失”
-      pointerDragging = true;
-      lastPointerX = np.x;
-      lastPointerY = np.y;
-      return;
+    if (!pointerDragging) pointerDragging = true;
+    if (!pointerMoved) {
+      var ddx = np.x - pointerStartX;
+      var ddy = np.y - pointerStartY;
+      if (ddx * ddx + ddy * ddy < DRAG_START_THRESHOLD_PX * DRAG_START_THRESHOLD_PX) {
+        return;
+      }
+      pointerMoved = true;
     }
-    var dx = np.x - lastPointerX;
-    var dy = np.y - lastPointerY;
-    lastPointerX = np.x;
-    lastPointerY = np.y;
-    // 增量控制：坐标系不一致时也能稳定移动
-    targetPlayerX += (dx / inputW) * 8.2;
-    targetPlayerZ += (-dy / inputH) * (PLAYER_Z_NEAR - PLAYER_Z_FAR) * 1.45;
-    targetPlayerX = Math.max(-3.4, Math.min(3.4, targetPlayerX));
-    targetPlayerZ = Math.max(PLAYER_Z_FAR, Math.min(PLAYER_Z_NEAR, targetPlayerZ));
+    setTargetsFromPointer(np, inputW, inputH);
     var nowDbg = Date.now();
     if (nowDbg - _lastPointerDebugTs > 250) {
       _lastPointerDebugTs = nowDbg;
-      console.log('[3D][input]', 'dx=' + dx.toFixed(2), 'dy=' + dy.toFixed(2), 'targetX=' + targetPlayerX.toFixed(3), 'targetZ=' + targetPlayerZ.toFixed(3));
+      console.log('[3D] pos:', targetPlayerX.toFixed(2), targetPlayerY.toFixed(2));
     }
   }
 
@@ -1281,6 +1932,23 @@ function run() {
       if (gameOver || !gameStarted || paused) return;
       var p = readPointerPosFromEvent(e);
       updatePlayerTargetFromPointer(p);
+    });
+  }
+    if (typeof wx.onMouseDown === 'function') {
+    wx.onMouseDown(function(e) {
+      if (gameOver || !gameStarted || paused) return;
+      var p = readPointerPosFromEvent(e);
+      if (!p) return;
+      if (p.x > w - 56 && p.y < 56) return;
+      var np = normalizePointerToWindow(p);
+      if (np) {
+        pointerDragging = true;
+        pointerMoved = false;
+        pointerStartX = np.x;
+        pointerStartY = np.y;
+        dragAnchorPlayerX = playerX;
+        dragAnchorPlayerY = playerY;
+      }
     });
   }
   wx.onTouchStart(function(e) {
@@ -1302,7 +1970,7 @@ function run() {
         wx.showModal({
           title: '游戏介绍',
           content:
-            '拖动屏幕：左右、上下移动战机，自动发射子弹。\n击落敌人增加得分，被敌人突破会掉血。\n在限定时间内达到目标分数即可通关。\n右上角按钮可暂停/继续。',
+            '拖动屏幕：左右控制横移，上下控制战机在屏幕中的高度（伪3D轨道逻辑）。\n战机Z轴固定，前进感由场景/敌机速度变化和视差提供。\n自动发射子弹；击落敌人得分；敌人突破防线会扣血。\n最终目标：击毁最终 Boss 即通关（分数仅用于成长/掉落节奏）。\n右上角可暂停/继续。',
           showCancel: false,
           confirmText: '知道了'
         });
@@ -1313,25 +1981,30 @@ function run() {
       paused = false;
       return;
     }
-    if (gameStarted && !gameOver && x > w - 84 && y < 86) {
+    if (gameStarted && !gameOver && x > w - 56 && y < 56) {
       paused = true;
       return;
     }
     if (gameOver) return;
-    // 进入拖动态，但不立即改目标坐标（防点击瞬移）
+    // 开始拖动
     var np = normalizePointerToWindow(p);
     if (np) {
       pointerDragging = true;
-      lastPointerX = np.x;
-      lastPointerY = np.y;
+      pointerMoved = false;
+      pointerStartX = np.x;
+      pointerStartY = np.y;
+      dragAnchorPlayerX = playerX;
+      dragAnchorPlayerY = playerY;
     }
     return;
   });
   wx.onTouchEnd(function() {
     pointerDragging = false;
+    pointerMoved = false;
   });
   wx.onTouchCancel(function() {
     pointerDragging = false;
+    pointerMoved = false;
   });
 
   function bindMesh(buf) {
@@ -1344,18 +2017,23 @@ function run() {
 
   var ZERO3 = new Float32Array([0, 0, 0]);
 
-  function drawMesh(buf, count, color, modelMat, emit, hot, addBurst) {
+  function drawMesh(buf, count, color, modelMat, emit, hot, addBurst, specPow, specStrength, rimStrength) {
     bindMesh(buf);
     mul4(tmp, view, modelMat);
     mul4(mvp, proj, tmp);
     n3From4(modelMat, n3);
     gl.uniformMatrix4fv(locMesh.mvp, false, mvp);
+    if (locMesh.model) gl.uniformMatrix4fv(locMesh.model, false, modelMat);
     gl.uniformMatrix3fv(locMesh.n, false, n3);
     gl.uniform3fv(locMesh.light, LIGHT_DIR);
+    if (locMesh.cam) gl.uniform3f(locMesh.cam, CAM_EX, CAM_EY, CAM_EZ);
     gl.uniform3fv(locMesh.rgb, color);
     if (locMesh.emit) gl.uniform1f(locMesh.emit, emit == null ? 0 : emit);
     if (locMesh.hot) gl.uniform3fv(locMesh.hot, hot || ZERO3);
     if (locMesh.addBurst) gl.uniform1f(locMesh.addBurst, addBurst == null ? 0 : addBurst);
+    if (locMesh.specPow) gl.uniform1f(locMesh.specPow, specPow == null ? 18 : specPow);
+    if (locMesh.specStrength) gl.uniform1f(locMesh.specStrength, specStrength == null ? 0.08 : specStrength);
+    if (locMesh.rimStrength) gl.uniform1f(locMesh.rimStrength, rimStrength == null ? 0.06 : rimStrength);
     gl.drawArrays(gl.TRIANGLES, 0, count);
   }
 
@@ -1419,8 +2097,8 @@ function run() {
     rotateZ4(tmp3, (playerRollTrimDeg * Math.PI) / 180);
     mul4(model, tmp2, tmp3);
     mul4(model, tmp, model);
-    // keep player clearly visible on mobile screens
-    scale4(tmp, 1.28 * zScale, 1.28 * zScale, 1.28 * zScale);
+    // 缩小战机体积，减少遮挡并提升可视边界余量
+    scale4(tmp, 0.9 * zScale, 0.9 * zScale, 0.9 * zScale);
     mul4(model, model, tmp);
 
     composePart(model, 0, 0, -0.02, 0.32, 0.17, 0.95, tmp3);
@@ -1456,7 +2134,7 @@ function run() {
       playerBank * 0.14 +
       Math.sin(nowMs * 0.003) * 0.01 +
       (playerRollTrimDeg * Math.PI) / 180 +
-      (PLAYER_VISUAL_ROLL_FIX_DEG * Math.PI) / 180;
+      getPlayerVisualRollRad();
     // 玩家战机前景优先，避免被大背景模型遮挡到“看不见”
     gl.disable(gl.DEPTH_TEST);
     if (ENABLE_PLAYER_BILLBOARD && playerLoaded) {
@@ -1489,11 +2167,13 @@ function run() {
     }
     // 机身方块在 billboard 之后绝不可立刻 gl.enable(CULL_FACE)，否则当前视角下整架机会被背面剔除成「看不见」
     gl.disable(gl.CULL_FACE);
-    // 双保险：即便贴图成功也保留实体机身，确保总能看见战机
-    drawPlayerCubes(nowMs);
+    // 贴图成功时以贴图为主；仅在贴图不可用时回退实体机身
+    if (!ENABLE_PLAYER_BILLBOARD || !playerLoaded) {
+      drawPlayerCubes(nowMs);
+    }
     // extra beacon glow so player is always locatable
     translate4(model, cx, cy + 0.04, cz - 0.02);
-    scale4(tmp, 0.14 + Math.sin(nowMs * 0.012) * 0.02, 0.14 + Math.sin(nowMs * 0.012) * 0.02, 0.14);
+    scale4(tmp, 0.1 + Math.sin(nowMs * 0.012) * 0.014, 0.1 + Math.sin(nowMs * 0.012) * 0.014, 0.1);
     mul4(tmp2, model, tmp);
     drawMesh(bEnemySphere, nEnemySphere, ENEMY_EYE_COLORS[2], tmp2);
     if (gameStarted) {
@@ -1502,7 +2182,7 @@ function run() {
       rotateZ4(tmp3, (playerRollTrimDeg * Math.PI) / 180);
       mul4(model, tmp2, tmp3);
       mul4(model, tmp, model);
-      scale4(tmp, 0.2, 0.11, 0.52);
+      scale4(tmp, 0.16, 0.09, 0.44);
       mul4(tmp2, model, tmp);
       drawMesh(bCube, nCube, C_SHIP_GLOW, tmp2);
     }
@@ -1563,6 +2243,46 @@ function run() {
     }
   }
 
+  function drawEnemyEmoji(e, nowMs, idx) {
+    var er = e.r || 0.42;
+    var sc = (e.boss ? 1.26 : 1.0) * (1 + Math.sin(nowMs * 0.005 + idx) * 0.04);
+    var halfW = er * sc;
+    var halfH = er * sc;
+    if (e.boss) {
+      // 防止 Boss 因透视靠近时“膨胀”到超出屏幕
+      halfW = Math.min(1.05, halfW);
+      halfH = Math.min(1.05, halfH);
+    }
+    var tex = enemyBallTextures[e.boss ? 'boss' : (e.enemyType || 'normal')];
+    if (!tex) {
+      tex = enemyBallTextures.normal;
+    }
+    billboardFacingCamera(e.x, e.y, e.z, 0, billRight, billUp);
+    gl.useProgram(pBill);
+    gl.disable(gl.CULL_FACE);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.depthMask(false);
+    gl.bindBuffer(gl.ARRAY_BUFFER, bBillboard);
+    gl.vertexAttribPointer(locBill.local, 2, gl.FLOAT, false, 16, 0);
+    gl.vertexAttribPointer(locBill.uv, 2, gl.FLOAT, false, 16, 8);
+    gl.enableVertexAttribArray(locBill.local);
+    gl.enableVertexAttribArray(locBill.uv);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.uniform1i(locBill.tex, 0);
+    gl.uniform3f(locBill.center, e.x, e.y, e.z);
+    gl.uniform3fv(locBill.right, billRight);
+    gl.uniform3fv(locBill.up, billUp);
+    gl.uniform1f(locBill.halfW, halfW);
+    gl.uniform1f(locBill.halfH, halfH);
+    gl.uniformMatrix4fv(locBill.mvp, false, vp);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.depthMask(true);
+    gl.disable(gl.BLEND);
+    gl.useProgram(pMesh);
+  }
+
   function showHome() {
     bgMode = 'home';
     bgIndex = Math.floor(Math.random() * homeBgFiles.length);
@@ -1574,17 +2294,30 @@ function run() {
     bullets = [];
     enemyBullets = [];
     enemies = [];
+    drops = [];
     muzzleFx = [];
     playerX = 0;
     targetPlayerX = 0;
     playerY = PLAYER_Y_DEFAULT;
+    targetPlayerY = PLAYER_Y_DEFAULT;
     playerZ = PLAYER_Z_DEFAULT;
     targetPlayerZ = PLAYER_Z_DEFAULT;
     playerBank = 0;
+    worldTravelX = 0;
     spawnT = 0;
     fireT = 0;
+    bgChangeTimer = 0;
+    mapChunkCooldown = 0;
+    lastMapChunkIx = 0;
+    lastMapChunkIy = 0;
     score = 0;
-    hp = 5;
+    hp = MAX_HP;
+    bulletLevel = 1;
+    shieldTimer = 0;
+    bossActive = false;
+    bossDefeated = false;
+    bossShootCycle = 0;
+    dropSpawnT = 0;
     buildUiAtlasTexture();
     buildHomeButtonLabelTextures();
   }
@@ -1668,7 +2401,9 @@ function run() {
     paused = false;
     wx.showModal({
       title: win ? '3D 通关' : '3D 失败',
-      content: '得分: ' + score + ' / ' + needScore + (win ? '\n已达到目标分数。' : '\n再试一次！'),
+      content: win
+        ? '恭喜！你已击毁最终 Boss。\n最终得分: ' + score
+        : '本局未能击毁最终 Boss。\n最终得分: ' + score + '\n再试一次！',
       showCancel: true,
       cancelText: '首页',
       confirmText: '再来一局',
@@ -1687,7 +2422,7 @@ function run() {
     bgIndex = Math.floor(Math.random() * battleBgFiles.length);
     loadBgAtIndex(bgIndex);
     score = 0;
-    hp = 5;
+    hp = MAX_HP;
     playerX = 0;
     targetPlayerX = 0;
     playerBank = 0;
@@ -1699,16 +2434,28 @@ function run() {
     spawnCount = 0;
     fireT = 0;
     powerTimer = 0;
+    bulletLevel = 1;
+    shieldTimer = 0;
     combo = 0;
     comboTimer = 0;
+    bossActive = false;
+    bossDefeated = false;
+    bossShootCycle = 0;
+    dropSpawnT = 0;
     gameOver = false;
     endedShown = false;
     paused = false;
     startAt = Date.now();
+    bgChangeTimer = 0;
+    mapChunkCooldown = 0;
+    lastMapChunkIx = 0;
+    lastMapChunkIy = 0;
     // 强制开局全景位（避免初始帧贴脸）
     playerY = PLAYER_Y_DEFAULT;
+    targetPlayerY = PLAYER_Y_DEFAULT;
     playerZ = PLAYER_Z_DEFAULT;
     targetPlayerZ = PLAYER_Z_DEFAULT;
+    worldTravelX = 0;
     
     gameStarted = true;
     wx.showToast({ title: '3D开战', icon: 'none', duration: 900 });
@@ -1725,15 +2472,36 @@ function run() {
     last = now;
     var left = duration - (now - startAt) / 1000;
 
-    bgPanT += dt;
+    bgPanT += dt * (gameStarted && !gameOver && !paused ? 1.85 : 1.0);
     homeFxT += dt;
+    if (bgBlending) {
+      bgBlend = Math.min(1, bgBlend + dt / bgBlendDuration);
+      if (bgBlend >= 1) {
+        bgCurrentTex = bgNextTex;
+        bgBlending = false;
+      }
+    }
 
     persp(proj, Math.PI / 3.6, w / h, 0.1, 100);
-    lookAt(view, 0, 5.7, 1.85, 0, 0.25, -6.6, 0, 1, 0);
+    var camX = 0;
+    var camLookY = 0.25;
+    if (gameStarted) {
+      // 屏幕内四向移动：横向固定镜头，保证左右位移可见
+      camX = 0;
+      // 纵向也固定镜头，避免相机跟随抵消“移动到顶部”的视觉效果
+      camLookY = 0.25;
+    }
+    lookAt(view, camX, 5.7, 1.85, camX, camLookY, -6.6, 0, 1, 0);
     mul4(vp, proj, view);
 
-    var starSpd = 2.2;
-    if (gameStarted && !gameOver && !paused) starSpd = 5.5;
+    var starSpd = 2.8;
+    var flowMul = 1.0;
+    if (gameStarted && !gameOver && !paused) {
+      // 战机越靠上，前进流速越高；越靠下，流速越低（雷霆战机式“推油门”体感）
+      var y01Flow = (playerY - PLAYER_Y_MIN) / Math.max(0.001, (PLAYER_Y_MAX - PLAYER_Y_MIN));
+      flowMul = 0.95 + y01Flow * 2.35;
+      starSpd = 5.2 * flowMul;
+    }
     if (gameStarted && !gameOver && paused) starSpd = 0;
     for (i = 0; i < starCount; i++) {
       var zi = i * 3 + 2;
@@ -1746,71 +2514,102 @@ function run() {
     if (gameStarted && !gameOver && !paused) {
       tauntCooldown = Math.max(0, tauntCooldown - dt);
       powerTimer = Math.max(0, powerTimer - dt);
+      shieldTimer = Math.max(0, shieldTimer - dt);
       comboTimer = Math.max(0, comboTimer - dt);
       if (combo > 0 && comboTimer <= 0) combo = 0;
-      var smooth = Math.min(1, dt * 24);
+      var smooth = 1.0;
       var prevX = playerX;
-      playerX += (targetPlayerX - playerX) * smooth;
-      playerZ += (targetPlayerZ - playerZ) * smooth;
-      playerY = PLAYER_Y_DEFAULT;
-      playerZ = Math.max(PLAYER_Z_FAR, Math.min(PLAYER_Z_NEAR, playerZ));
-      targetPlayerZ = Math.max(PLAYER_Z_FAR, Math.min(PLAYER_Z_NEAR, targetPlayerZ));
-      playerBank = (playerX - prevX) * 8;
+      playerX = targetPlayerX;
+      playerY = targetPlayerY;
+      targetPlayerZ = PLAYER_Z_DEFAULT;
+      playerZ = targetPlayerZ;
+      if (!isFinite(playerX) || !isFinite(playerY) || !isFinite(playerZ)) {
+        playerX = 0;
+        targetPlayerX = 0;
+        playerY = PLAYER_Y_DEFAULT;
+        targetPlayerY = PLAYER_Y_DEFAULT;
+        playerZ = PLAYER_Z_DEFAULT;
+        targetPlayerZ = PLAYER_Z_DEFAULT;
+      }
+      playerX = clampPlayerXToScreen(playerX, playerY, playerZ);
+      targetPlayerX = clampPlayerXToScreen(targetPlayerX, targetPlayerY, targetPlayerZ);
+      playerY = Math.max(PLAYER_Y_MIN, Math.min(PLAYER_Y_MAX, playerY));
+      targetPlayerY = Math.max(PLAYER_Y_MIN, Math.min(PLAYER_Y_MAX, targetPlayerY));
+      playerZ = Math.max(PLAYER_Z_FAR, Math.min(Math.min(PLAYER_Z_NEAR, PLAYER_Z_SAFE_MAX), playerZ));
+      targetPlayerZ = Math.max(PLAYER_Z_FAR, Math.min(Math.min(PLAYER_Z_NEAR, PLAYER_Z_SAFE_MAX), targetPlayerZ));
+      // 不回环：按真实横向位移累计“世界里程”，用于地图区块刷新
+      worldTravelX += playerX - prevX;
+      // 关闭左右移动时的机身晃动（bank）
+      playerBank = 0;
       spawnT += dt;
       fireT += dt;
+      dropSpawnT += dt;
       bgChangeTimer += dt;
+      mapChunkCooldown = Math.max(0, mapChunkCooldown - dt);
+      var chunkIx = Math.floor(worldTravelX / 12);
+      var chunkIy = Math.floor((playerY - PLAYER_Y_DEFAULT) / 18);
+      if ((chunkIx !== lastMapChunkIx || chunkIy !== lastMapChunkIy) && mapChunkCooldown <= 0) {
+        lastMapChunkIx = chunkIx;
+        lastMapChunkIy = chunkIy;
+        mapChunkCooldown = 2.8;
+        bgIndex = Math.floor(Math.random() * battleBgFiles.length);
+        loadBgAtIndex(bgIndex);
+      }
       if (bgChangeTimer >= bgChangeInterval) {
         bgChangeTimer = 0;
-        bgIndex = (bgIndex + 1) % battleBgFiles.length;
+        bgIndex = Math.floor(Math.random() * battleBgFiles.length);
         loadBgAtIndex(bgIndex);
       }
 
-      var spawnInterval = Math.max(0.28, 0.58 - Math.min(1, score / needScore) * 0.24);
-      if (spawnT >= spawnInterval) {
+      if (!bossActive && !bossDefeated && score >= bossSpawnScore) {
+        spawnBoss();
+      }
+
+      var spawnInterval = Math.max(0.22, (0.58 - Math.min(1, score / needScore) * 0.2) / Math.max(0.68, flowMul));
+      if (!bossActive && spawnT >= spawnInterval) {
         spawnT = 0;
         spawnEnemy();
       }
-      var fireInterval = powerTimer > 0 ? 0.055 : 0.09;
+      if (!bossActive && powerTimer < 1.2 && dropSpawnT >= 8.5) {
+        dropSpawnT = 0;
+        spawnDrop(playerX + (Math.random() * 2 - 1) * 1.8, playerY + 0.4, -8.5, 'atk');
+      }
+      var fireInterval = bulletLevel >= 4 ? 0.046 : (bulletLevel >= 2 ? 0.06 : (powerTimer > 0 ? 0.055 : 0.09));
       if (fireT >= fireInterval) {
         fireT = 0;
-        // 机翼双发：按屏幕上战机两翼位置反投影到 3D，确保“看到哪儿就从哪儿出弹”
+        // 世界坐标直接出弹：NDC 反投影与机体 playerY 不同步时，弹道路径与敌人 e.x/e.y/e.z 不一致，导致“打中无反应”
         var bz = playerZ - 0.22;
-        var wingNdcXOffset;
-        var muzzleNdcY;
-        var leftOk;
-        var rightOk;
-        var leftXY = [0, 0];
-        var rightXY = [0, 0];
-        computePlayerSpriteNdc(playerNdc);
-        wingNdcXOffset = playerNdc.hw * 0.52;
-        muzzleNdcY = playerNdc.ty + playerNdc.hh * 0.16;
-        leftOk = worldFromNdcOnPlane(leftXY, vp, playerNdc.tx - wingNdcXOffset, muzzleNdcY, bz);
-        rightOk = worldFromNdcOnPlane(rightXY, vp, playerNdc.tx + wingNdcXOffset, muzzleNdcY, bz);
-        if (!leftOk || !rightOk) {
-          var bypFallback = playerY - 0.01;
-          var wingOffsetFallback = 0.52;
-          leftXY[0] = playerX - wingOffsetFallback;
-          leftXY[1] = bypFallback;
-          rightXY[0] = playerX + wingOffsetFallback;
-          rightXY[1] = bypFallback;
+        var wingW = 0.52;
+        var baseY = playerY - 0.02;
+        var shotOffsets = [-wingW, wingW];
+        if (bulletLevel >= 2) {
+          shotOffsets.push(-0.24, 0.24);
         }
-        bullets.push({
-          x: leftXY[0],
-          y: leftXY[1],
-          z: bz,
-          p: powerTimer > 0 ? 1 : 0,
-          seed: Math.random() * 6.28318
-        });
-        bullets.push({
-          x: rightXY[0],
-          y: rightXY[1],
-          z: bz,
-          p: powerTimer > 0 ? 1 : 0,
-          seed: Math.random() * 6.28318
-        });
+        if (bulletLevel >= 4) {
+          shotOffsets.push(-0.86, 0.86);
+        }
+        var so;
+        for (so = 0; so < shotOffsets.length; so++) {
+          var sx = playerX + shotOffsets[so];
+          bullets.push({
+            x: sx,
+            y: baseY + Math.abs(shotOffsets[so]) * 0.02,
+            z: bz,
+            vx: 0,
+            vy: 0,
+            p: bulletLevel >= 2 || powerTimer > 0 ? 1 : 0,
+            seed: Math.random() * 6.28318
+          });
+          var tS = chooseAimTarget(sx, baseY, bz);
+          if (tS) {
+            bullets[bullets.length - 1].vx = (tS.x - sx) * (bulletLevel >= 4 ? 1.55 : 1.3);
+            bullets[bullets.length - 1].vy = (tS.y - baseY) * (bulletLevel >= 4 ? 1.28 : 1.1);
+          }
+        }
         if (bullets.length > 220) bullets.splice(0, bullets.length - 220);
-        muzzleFx.push({ x: leftXY[0], y: leftXY[1], z: bz + 0.04, life: 0.11 });
-        muzzleFx.push({ x: rightXY[0], y: rightXY[1], z: bz + 0.04, life: 0.11 });
+        for (so = 0; so < shotOffsets.length; so++) {
+          muzzleFx.push({ x: playerX + shotOffsets[so], y: baseY, z: bz + 0.04, life: 0.11 });
+        }
         if (muzzleFx.length > 36) muzzleFx.splice(0, muzzleFx.length - 36);
       }
 
@@ -1820,6 +2619,8 @@ function run() {
       }
 
       for (i = bullets.length - 1; i >= 0; i--) {
+        bullets[i].x += (bullets[i].vx || 0) * dt;
+        bullets[i].y += (bullets[i].vy || 0) * dt;
         bullets[i].z -= 14 * dt;
         if (bullets[i].z < -13) bullets.splice(i, 1);
       }
@@ -1829,42 +2630,126 @@ function run() {
         enemies[i].gait += dt * (4.2 + enemies[i].speed * 0.22);
         enemies[i].flashT = Math.max(0, (enemies[i].flashT || 0) - dt);
         enemies[i].y += Math.sin(enemies[i].phase) * 0.0016;
+        if (enemies[i].boss) {
+          enemies[i].x += Math.sin(now * 0.0016 + i) * 0.9 * dt;
+          enemies[i].y += Math.cos(now * 0.0011 + i) * 0.6 * dt;
+          enemies[i].x = Math.max(-3.6, Math.min(3.6, enemies[i].x));
+          enemies[i].y = Math.max(-1.3, Math.min(1.9, enemies[i].y));
+        } else {
+          // 普通目标轻微回中，避免从中间一路漂移到屏幕外
+          enemies[i].x += (playerX - enemies[i].x) * dt * 0.26;
+          enemies[i].x = Math.max(-3.4, Math.min(3.4, enemies[i].x));
+          enemies[i].y = Math.max(-1.55, Math.min(1.85, enemies[i].y));
+        }
         enemies[i].shootT += dt;
         if (enemies[i].shootT >= enemies[i].shootInterval) {
           enemies[i].shootT = 0;
-          enemyBullets.push({
-            x: enemies[i].x,
-            y: enemies[i].y,
-            z: enemies[i].z + (enemies[i].r || 0.42) * 0.6,
-            vx: (playerX - enemies[i].x) * 0.2,
-            vy: (playerY - enemies[i].y) * 0.28,
-            vz: 5.8 + Math.random() * 1.4
-          });
-          if (enemyBullets.length > 260) enemyBullets.splice(0, enemyBullets.length - 260);
+          if (enemies[i].boss) {
+            var ringN = 7;
+            bossShootCycle++;
+            var gapIndex = bossShootCycle % ringN; // 始终保留一个缺口：可躲避但窗口有限
+            var bsi;
+            for (bsi = 0; bsi < ringN; bsi++) {
+              if (bsi === gapIndex) continue;
+              var ang = (Math.PI * 2 * bsi) / ringN + bossShootCycle * 0.28;
+              var bossSpeed = 5.4 + Math.random() * 0.7;
+              enemyBullets.push({
+                x: enemies[i].x + Math.cos(ang) * 0.15,
+                y: enemies[i].y + Math.sin(ang) * 0.08,
+                z: enemies[i].z + (enemies[i].r || 0.42) * 0.6,
+                vx: Math.cos(ang) * 1.25 + (playerX - enemies[i].x) * 0.12,
+                vy: Math.sin(ang) * 1.02 + (playerY - enemies[i].y) * 0.14,
+                vz: bossSpeed,
+                kind: 'boss',
+                life: 3.0,
+                pulse: Math.random() * 6.28318
+              });
+            }
+            // 间歇三连瞄准：提高压迫感，但间歇出现，仍可读可躲
+            if (bossShootCycle % 2 === 0) {
+              var baseVX = (playerX - enemies[i].x) * 0.36;
+              var baseVY = (playerY - enemies[i].y) * 0.34;
+              var spread;
+              for (spread = -1; spread <= 1; spread++) {
+                enemyBullets.push({
+                  x: enemies[i].x + spread * 0.18,
+                  y: enemies[i].y + 0.04,
+                  z: enemies[i].z + (enemies[i].r || 0.42) * 0.58,
+                  vx: baseVX + spread * 0.36,
+                  vy: baseVY + spread * 0.22,
+                  vz: 6.0,
+                  kind: 'boss',
+                  life: 2.3,
+                  pulse: Math.random() * 6.28318
+                });
+              }
+            }
+          } else {
+            enemyBullets.push({
+              x: enemies[i].x,
+              y: enemies[i].y,
+              z: enemies[i].z + (enemies[i].r || 0.42) * 0.6,
+              vx: (playerX - enemies[i].x) * 0.2,
+              vy: (playerY - enemies[i].y) * 0.28,
+              vz: 4.8 + Math.random() * 1.0,
+              kind: 'normal',
+              life: 2.2,
+              pulse: Math.random() * 6.28318
+            });
+          }
+          if (enemyBullets.length > 320) enemyBullets.splice(0, enemyBullets.length - 320);
         }
-        enemies[i].z += enemies[i].speed * dt;
-        if (enemies[i].z > 1.0) {
-          hp--;
+        if (enemies[i].boss) {
+          // Boss 保持在中远景作战位，不再向镜头持续逼近导致体积失控
+          var bossFightZ = -7.0;
+          enemies[i].z += (bossFightZ - enemies[i].z) * dt * 0.9;
+          enemies[i].z = Math.max(-10.5, Math.min(-5.8, enemies[i].z));
+        } else {
+          enemies[i].z += enemies[i].speed * dt * flowMul * 0.66;
+        }
+        if (!enemies[i].boss && enemies[i].z > 2.6) {
+          hp -= enemies[i].boss ? 0.7 : 0.4;
           enemies.splice(i, 1);
+          if (bossActive && hp > 0 && enemies.length === 0) bossActive = false;
           if (hp <= 0) endGame(false);
         }
       }
 
       for (i = enemyBullets.length - 1; i >= 0; i--) {
+        enemyBullets[i].life -= dt;
         enemyBullets[i].x += enemyBullets[i].vx * dt;
         enemyBullets[i].y += (enemyBullets[i].vy || 0) * dt;
         enemyBullets[i].z += enemyBullets[i].vz * dt;
-        if (enemyBullets[i].z > 1.3) {
+        if (enemyBullets[i].life <= 0 || enemyBullets[i].z > 1.3) {
           enemyBullets.splice(i, 1);
           continue;
         }
         var pdx = enemyBullets[i].x - playerX;
         var pdy = enemyBullets[i].y - playerY;
         var pdz = enemyBullets[i].z - playerZ;
-        if (pdx * pdx + pdy * pdy * 1.35 + pdz * pdz < 0.12) {
+        if (pdx * pdx + pdy * pdy * 1.35 + pdz * pdz < 0.09) {
           enemyBullets.splice(i, 1);
-          hp--;
+          hp -= shieldTimer > 0 ? 0.15 : 0.45;
           if (hp <= 0) endGame(false);
+        }
+      }
+
+      for (i = drops.length - 1; i >= 0; i--) {
+        var d = drops[i];
+        d.life -= dt;
+        d.phase += dt * 5.2;
+        d.z += 2.2 * dt * flowMul;
+        d.y += Math.sin(d.phase) * 0.0065;
+        if (d.life <= 0 || d.z > 1.4) {
+          drops.splice(i, 1);
+          continue;
+        }
+        var ddx = d.x - playerX;
+        var ddy = d.y - playerY;
+        var ddz = d.z - playerZ;
+        if (ddx * ddx + ddy * ddy + ddz * ddz < 0.42) {
+          applyDrop(d.kind);
+          drops.splice(i, 1);
         }
       }
 
@@ -1877,22 +2762,29 @@ function run() {
           var dx = b.x - e.x;
           var dy = b.y - e.y;
           var dz = b.z - e.z;
-          var hitR = (e.r || 0.42) * 0.62;
-          if (dx * dx + dy * dy * 1.25 + dz * dz < hitR * hitR) {
+          // 略放大判定球 + 对称距离：原 dy*1.25 易漏检；高速弹单帧位移大时加 z 宽容度防穿模漏判
+          var hitR = (e.r || 0.42) * 1.18 + 0.42;
+          if (dx * dx + dy * dy + dz * dz < hitR * hitR) {
             bullets.splice(j, 1);
             hit = true;
-            e.hp -= 1;
+            e.hp -= e.boss ? 0.4 : 1;
             e.flashT = 0.08;
             break;
           }
         }
         if (hit && e.hp <= 0) {
-          var scoreGain = e.elite ? 3 : 1;
+          var scoreGain = e.boss ? 14 : (e.elite ? 3 : 1);
           combo = Math.min(60, combo + 1);
           comboTimer = 2.2;
           var mul = 1 + Math.min(4, (combo / 10) | 0) * 0.2;
           enemies.splice(i, 1);
           score += Math.floor(scoreGain * mul);
+          maybeDropFromEnemy(e);
+          if (e.boss) {
+            bossActive = false;
+            bossDefeated = true;
+            wx.showToast({ title: 'Boss 击破！', icon: 'none', duration: 900 });
+          }
           if (e.elite) {
             powerTimer = Math.max(powerTimer, 6);
             wx.showToast({ title: '火力过载 +6s', icon: 'none', duration: 700 });
@@ -1903,8 +2795,8 @@ function run() {
       }
 
       playerBank *= 0.7;
-      if (score >= needScore) endGame(true);
-      if (left <= 0) endGame(score >= needScore);
+      if (bossDefeated) endGame(true);
+      if (left <= 0 && !bossDefeated) endGame(false);
     }
 
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
@@ -1919,22 +2811,32 @@ function run() {
     gl.vertexAttribPointer(locBg.uv, 2, gl.FLOAT, false, 16, 8);
     gl.enableVertexAttribArray(locBg.pos);
     gl.enableVertexAttribArray(locBg.uv);
+    var bgTexFrom = getBgTexture(bgCurrentTex);
+    var bgTexTo = getBgTexture(bgBlending ? bgNextTex : bgCurrentTex);
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, bgTex);
-    gl.uniform1i(locBg.tex, 0);
+    gl.bindTexture(gl.TEXTURE_2D, bgTexFrom);
+    gl.uniform1i(locBg.texA, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, bgTexTo);
+    gl.uniform1i(locBg.texB, 1);
+    gl.uniform1f(locBg.blend, bgBlending ? bgBlend : 1);
     gl.uniform1f(locBg.mix, bgLoaded ? 0.94 : 0.0);
     // 首页轻微漂移；战斗中加大视差（仍限制在 clamp 内，用多频 sin 模拟纵深移动）
     var du;
     var dv;
     if (gameStarted && !gameOver) {
       du =
-        Math.sin(bgPanT * 0.52) * 0.055 +
-        Math.sin(bgPanT * 0.19) * 0.028 +
-        Math.cos(bgPanT * 0.31) * 0.018;
+        Math.sin(bgPanT * 0.72) * 0.078 +
+        Math.sin(bgPanT * 0.27) * 0.042 +
+        Math.cos(bgPanT * 0.39) * 0.026 +
+        Math.sin(worldTravelX * 0.052) * 0.085 +
+        (playerY - PLAYER_Y_DEFAULT) * 0.022;
       dv =
-        Math.cos(bgPanT * 0.44) * 0.062 +
-        Math.sin(bgPanT * 0.27) * 0.032 +
-        Math.sin(bgPanT * 0.11) * 0.022;
+        Math.cos(bgPanT * 0.62) * 0.086 +
+        Math.sin(bgPanT * 0.36) * 0.044 +
+        Math.sin(bgPanT * 0.18) * 0.03 +
+        (playerY - PLAYER_Y_DEFAULT) * 0.024 -
+        Math.cos(worldTravelX * 0.032) * 0.03;
     } else {
       du = Math.sin(bgPanT * 0.32) * 0.02;
       dv = Math.cos(bgPanT * 0.24) * 0.016;
@@ -1965,16 +2867,7 @@ function run() {
     id4(model);
     drawMesh(bFloor, nFloor, C_FLOOR, model);
 
-    // far planets
-    translate4(model, 2.55, 2.6, -10.8);
-    scale4(tmp, 1.25, 1.25, 1.25);
-    mul4(tmp2, model, tmp);
-    drawMesh(bCube, nCube, C_PLANET_A, tmp2);
-
-    translate4(model, -2.9, 3.1, -9.4);
-    scale4(tmp, 0.78, 0.78, 0.78);
-    mul4(tmp2, model, tmp);
-    drawMesh(bCube, nCube, C_PLANET_B, tmp2);
+    // 移除远景方块占位物，避免顶部出现“方块天体”伪影
 
     drawPlayer(now);
 
@@ -1982,149 +2875,70 @@ function run() {
       drawOneBullet(now, i);
     }
     for (i = 0; i < enemyBullets.length; i++) {
-      translate4(model, enemyBullets[i].x, enemyBullets[i].y, enemyBullets[i].z);
-      var ep = 1 + Math.sin(now * 0.018 + i) * 0.12;
-      scale4(tmp, 0.065 * ep, 0.065 * ep, 0.2);
-      mul4(tmp2, model, tmp);
-      drawMesh(bCube, nCube, ENEMY_EYE_COLORS[0], tmp2);
-      scale4(tmp, 0.038 * ep, 0.038 * ep, 0.12);
-      mul4(tmp2, model, tmp);
-      drawMesh(bCube, nCube, ENEMY_EYE_COLORS[1], tmp2);
+      var eb = enemyBullets[i];
+      var isBossBullet = eb.kind === 'boss';
+      var ep = 1 + Math.sin(now * 0.02 + (eb.pulse || 0)) * 0.14;
+      var half = (isBossBullet ? 0.15 : 0.11) * ep;
+      var bulletTex = isBossBullet ? enemyBulletTexBoss : enemyBulletTexNormal;
+      if (!bulletTex) continue;
+      billboardFacingCamera(eb.x, eb.y, eb.z, 0, billRight, billUp);
+      gl.useProgram(pBill);
+      gl.disable(gl.CULL_FACE);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.depthMask(false);
+      gl.bindBuffer(gl.ARRAY_BUFFER, bBillboard);
+      gl.vertexAttribPointer(locBill.local, 2, gl.FLOAT, false, 16, 0);
+      gl.vertexAttribPointer(locBill.uv, 2, gl.FLOAT, false, 16, 8);
+      gl.enableVertexAttribArray(locBill.local);
+      gl.enableVertexAttribArray(locBill.uv);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, bulletTex);
+      gl.uniform1i(locBill.tex, 0);
+      gl.uniform3f(locBill.center, eb.x, eb.y, eb.z);
+      gl.uniform3fv(locBill.right, billRight);
+      gl.uniform3fv(locBill.up, billUp);
+      gl.uniform1f(locBill.halfW, half);
+      gl.uniform1f(locBill.halfH, half);
+      gl.uniformMatrix4fv(locBill.mvp, false, vp);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      gl.depthMask(true);
+      gl.disable(gl.BLEND);
+      gl.useProgram(pMesh);
+    }
+    for (i = 0; i < drops.length; i++) {
+      var dk = drops[i].kind;
+      var dPulse = 1 + Math.sin(now * 0.018 + i) * 0.08;
+      var dHalf = 0.28 * dPulse;
+      var dTex = dk === 'heal' ? powerupTexHeal : (dk === 'shield' ? powerupTexShield : powerupTexAtk);
+      if (!dTex) continue;
+      billboardFacingCamera(drops[i].x, drops[i].y, drops[i].z, 0, billRight, billUp);
+      gl.useProgram(pBill);
+      gl.disable(gl.CULL_FACE);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.depthMask(false);
+      gl.bindBuffer(gl.ARRAY_BUFFER, bBillboard);
+      gl.vertexAttribPointer(locBill.local, 2, gl.FLOAT, false, 16, 0);
+      gl.vertexAttribPointer(locBill.uv, 2, gl.FLOAT, false, 16, 8);
+      gl.enableVertexAttribArray(locBill.local);
+      gl.enableVertexAttribArray(locBill.uv);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, dTex);
+      gl.uniform1i(locBill.tex, 0);
+      gl.uniform3f(locBill.center, drops[i].x, drops[i].y, drops[i].z);
+      gl.uniform3fv(locBill.right, billRight);
+      gl.uniform3fv(locBill.up, billUp);
+      gl.uniform1f(locBill.halfW, dHalf);
+      gl.uniform1f(locBill.halfH, dHalf);
+      gl.uniformMatrix4fv(locBill.mvp, false, vp);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      gl.depthMask(true);
+      gl.disable(gl.BLEND);
+      gl.useProgram(pMesh);
     }
     for (i = 0; i < enemies.length; i++) {
-      rotateY4(tmp, now * 0.0025 + i);
-      translate4(tmp2, enemies[i].x, enemies[i].y, enemies[i].z);
-      mul4(model, tmp2, tmp);
-      var er = enemies[i].r || 0.42;
-      var ec = enemies[i].color || ENEMY_COLORS[0];
-      var mc = enemies[i].maskColor || ENEMY_MASK_COLORS[0];
-      var eye = enemies[i].eyeColor || ENEMY_EYE_COLORS[0];
-      var hpRatioE = Math.max(0.2, (enemies[i].hp || 1) / (enemies[i].hpMax || 1));
-      var drawColor = hpRatioE < 0.45 ? ENEMY_EYE_COLORS[0] : ec;
-      var gait = enemies[i].gait || 0;
-      var armSwing = Math.sin(gait) * er * 0.18;
-      var legSwing = Math.sin(gait + Math.PI * 0.5) * er * 0.16;
-      var headBob = Math.sin(gait * 0.7) * er * 0.06;
-      var tentacleSwing = Math.sin(gait * 1.35) * er * 0.22;
-      if ((enemies[i].flashT || 0) > 0) {
-        drawColor = ENEMY_EYE_COLORS[1];
-      }
-      // alien-like silhouette (bio-mech)
-      // torso core
-      scale4(tmp, er * 0.62, er * 0.84, er * 0.4);
-      mul4(tmp2, model, tmp);
-      drawMesh(bEnemySphere, nEnemySphere, drawColor, tmp2);
-      // abdomen
-      translate4(tmp, 0, -er * 0.52, -er * 0.08);
-      mul4(tmp2, model, tmp);
-      scale4(tmp, er * 0.52, er * 0.38, er * 0.34);
-      mul4(tmp3, tmp2, tmp);
-      drawMesh(bEnemySphere, nEnemySphere, mc, tmp3);
-      // elongated head
-      translate4(tmp, 0, er * 0.9 + headBob, er * 0.06);
-      mul4(tmp2, model, tmp);
-      scale4(tmp, er * 0.34, er * 0.46, er * 0.3);
-      mul4(tmp3, tmp2, tmp);
-      drawMesh(bEnemySphere, nEnemySphere, mc, tmp3);
-      // jaw
-      translate4(tmp, 0, er * 0.72, er * 0.22);
-      mul4(tmp2, model, tmp);
-      scale4(tmp, er * 0.28, er * 0.14, er * 0.16);
-      mul4(tmp3, tmp2, tmp);
-      drawMesh(bCube, nCube, drawColor, tmp3);
-      // arms (claw-like)
-      translate4(tmp, -er * 0.68, -er * 0.06 + armSwing, er * 0.05);
-      mul4(tmp2, model, tmp);
-      scale4(tmp, er * 0.16, er * 0.5, er * 0.16);
-      mul4(tmp3, tmp2, tmp);
-      drawMesh(bCube, nCube, mc, tmp3);
-      translate4(tmp, er * 0.68, -er * 0.06 - armSwing, er * 0.05);
-      mul4(tmp2, model, tmp);
-      scale4(tmp, er * 0.16, er * 0.5, er * 0.16);
-      mul4(tmp3, tmp2, tmp);
-      drawMesh(bCube, nCube, mc, tmp3);
-      // legs
-      translate4(tmp, -er * 0.2, -er * 0.98 + legSwing, 0);
-      mul4(tmp2, model, tmp);
-      scale4(tmp, er * 0.18, er * 0.56, er * 0.18);
-      mul4(tmp3, tmp2, tmp);
-      drawMesh(bCube, nCube, mc, tmp3);
-      translate4(tmp, er * 0.2, -er * 0.98 - legSwing, 0);
-      mul4(tmp2, model, tmp);
-      scale4(tmp, er * 0.18, er * 0.56, er * 0.18);
-      mul4(tmp3, tmp2, tmp);
-      drawMesh(bCube, nCube, mc, tmp3);
-      // feet claws
-      translate4(tmp, -er * 0.2, -er * 1.3 + legSwing, er * 0.12);
-      mul4(tmp2, model, tmp);
-      scale4(tmp, er * 0.26, er * 0.08, er * 0.28);
-      mul4(tmp3, tmp2, tmp);
-      drawMesh(bCube, nCube, drawColor, tmp3);
-      translate4(tmp, er * 0.2, -er * 1.3 - legSwing, er * 0.12);
-      mul4(tmp2, model, tmp);
-      scale4(tmp, er * 0.26, er * 0.08, er * 0.28);
-      mul4(tmp3, tmp2, tmp);
-      drawMesh(bCube, nCube, drawColor, tmp3);
-      // back spines / tentacle roots
-      translate4(tmp, -er * 0.22, er * 0.44, -er * 0.3);
-      mul4(tmp2, model, tmp);
-      scale4(tmp, er * 0.08, er * 0.42, er * 0.08);
-      mul4(tmp3, tmp2, tmp);
-      drawMesh(bCube, nCube, mc, tmp3);
-      translate4(tmp, er * 0.22, er * 0.44, -er * 0.3);
-      mul4(tmp2, model, tmp);
-      scale4(tmp, er * 0.08, er * 0.42, er * 0.08);
-      mul4(tmp3, tmp2, tmp);
-      drawMesh(bCube, nCube, mc, tmp3);
-      // tentacle tails (2-segment each side)
-      translate4(tmp, -er * 0.34, -er * 0.36, -er * 0.28);
-      mul4(tmp2, model, tmp);
-      rotateY4(tmp, tentacleSwing * 0.9);
-      mul4(tmp3, tmp2, tmp);
-      scale4(tmp, er * 0.09, er * 0.4, er * 0.09);
-      mul4(tmp2, tmp3, tmp);
-      drawMesh(bCube, nCube, mc, tmp2);
-      translate4(tmp, 0, -er * 0.36, 0);
-      mul4(tmp2, tmp3, tmp);
-      rotateY4(tmp, tentacleSwing * 1.2);
-      mul4(tmp3, tmp2, tmp);
-      scale4(tmp, er * 0.08, er * 0.34, er * 0.08);
-      mul4(tmp2, tmp3, tmp);
-      drawMesh(bCube, nCube, drawColor, tmp2);
-
-      translate4(tmp, er * 0.34, -er * 0.36, -er * 0.28);
-      mul4(tmp2, model, tmp);
-      rotateY4(tmp, -tentacleSwing * 0.9);
-      mul4(tmp3, tmp2, tmp);
-      scale4(tmp, er * 0.09, er * 0.4, er * 0.09);
-      mul4(tmp2, tmp3, tmp);
-      drawMesh(bCube, nCube, mc, tmp2);
-      translate4(tmp, 0, -er * 0.36, 0);
-      mul4(tmp2, tmp3, tmp);
-      rotateY4(tmp, -tentacleSwing * 1.2);
-      mul4(tmp3, tmp2, tmp);
-      scale4(tmp, er * 0.08, er * 0.34, er * 0.08);
-      mul4(tmp2, tmp3, tmp);
-      drawMesh(bCube, nCube, drawColor, tmp2);
-      // glowing eye cores
-      translate4(tmp, -er * 0.1, er * 0.92, er * 0.24);
-      mul4(tmp2, model, tmp);
-      scale4(tmp, er * 0.07, er * 0.07, er * 0.07);
-      mul4(tmp3, tmp2, tmp);
-      drawMesh(bEnemySphere, nEnemySphere, eye, tmp3);
-      translate4(tmp, er * 0.1, er * 0.92, er * 0.24);
-      mul4(tmp2, model, tmp);
-      scale4(tmp, er * 0.07, er * 0.07, er * 0.07);
-      mul4(tmp3, tmp2, tmp);
-      drawMesh(bEnemySphere, nEnemySphere, eye, tmp3);
-      // elite aura core
-      if (enemies[i].elite) {
-        translate4(tmp, 0, er * 0.16, -er * 0.18);
-        mul4(tmp2, model, tmp);
-        scale4(tmp, er * 0.22, er * 0.22, er * 0.22);
-        mul4(tmp3, tmp2, tmp);
-        drawMesh(bEnemySphere, nEnemySphere, ENEMY_EYE_COLORS[1], tmp3);
-      }
+      drawEnemyEmoji(enemies[i], now, i);
     }
 
     drawPauseButtonInGame();
@@ -2133,17 +2947,96 @@ function run() {
       gl.disable(gl.DEPTH_TEST);
       gl.disable(gl.CULL_FACE);
       gl.enable(gl.SCISSOR_TEST);
-      var hpRatio = Math.max(0, hp / 5);
-      gl.scissor(16, h - 18, Math.floor((w - 32) * hpRatio), 8);
+      var hpRatio = Math.max(0, hp / MAX_HP);
+      var hpBarX = Math.round(16 * uiScaleX);
+      var hpBarW = Math.max(1, Math.floor((w - 32) * hpRatio * uiScaleX));
+      var hpBarH = Math.max(5, Math.round(10 * uiScaleY));
+      var hpBarY = Math.max(0, renderH - Math.round(22 * uiScaleY));
+      gl.scissor(hpBarX, hpBarY, hpBarW, hpBarH);
       gl.clearColor(0.29, 0.87, 0.36, 1);
       gl.clear(gl.COLOR_BUFFER_BIT);
       gl.disable(gl.SCISSOR_TEST);
 
+      if (shieldTimer > 0) {
+        gl.enable(gl.SCISSOR_TEST);
+        var shBarX = Math.round(16 * uiScaleX);
+        var shBarW = Math.max(1, Math.floor((w - 32) * Math.min(1, shieldTimer / 5.5) * uiScaleX));
+        var shBarH = Math.max(3, Math.round(6 * uiScaleY));
+        var shBarY = Math.max(0, renderH - Math.round(48 * uiScaleY));
+        gl.scissor(shBarX, shBarY, shBarW, shBarH);
+        gl.clearColor(0.34, 0.76, 0.98, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.disable(gl.SCISSOR_TEST);
+      }
+
       gl.enable(gl.SCISSOR_TEST);
       var progress = Math.min(1, score / needScore);
-      gl.scissor(16, h - 32, Math.floor((w - 32) * progress), 6);
+      var pgBarX = Math.round(16 * uiScaleX);
+      var pgBarW = Math.max(1, Math.floor((w - 32) * progress * uiScaleX));
+      var pgBarH = Math.max(4, Math.round(7 * uiScaleY));
+      var pgBarY = Math.max(0, renderH - Math.round(36 * uiScaleY));
+      gl.scissor(pgBarX, pgBarY, pgBarW, pgBarH);
       gl.clearColor(0.95, 0.78, 0.2, 1);
       gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.disable(gl.SCISSOR_TEST);
+
+      if (bossActive) {
+        var boss = null;
+        var bossHpRatio = 0;
+        for (i = 0; i < enemies.length; i++) {
+          if (enemies[i].boss) {
+            boss = enemies[i];
+            bossHpRatio = Math.max(0, (enemies[i].hp || 0) / Math.max(1, enemies[i].hpMax || 1));
+            break;
+          }
+        }
+        if (boss && projectScreenPos(enemyBarPos, boss.x, boss.y + (boss.r || 1.8) * 1.15, boss.z)) {
+          gl.enable(gl.SCISSOR_TEST);
+          var bossBarFullW = Math.max(120, Math.floor((boss.r || 1.8) * 115));
+          var bossBarH = Math.max(8, Math.floor(10 * uiScaleY));
+          var bossBarX = Math.floor(enemyBarPos[0] - bossBarFullW * 0.5);
+          var bossBarY = Math.floor(enemyBarPos[1] + 16);
+          if (!(bossBarX > renderW - 2 || bossBarY > renderH - 2 || bossBarX + bossBarFullW < 2 || bossBarY + bossBarH < 2)) {
+            var clipX = Math.max(0, bossBarX);
+            var clipY = Math.max(0, bossBarY);
+            var clipW = Math.max(1, Math.min(renderW - clipX, bossBarFullW - Math.max(0, clipX - bossBarX)));
+            var clipH = Math.max(1, Math.min(renderH - clipY, bossBarH));
+            gl.scissor(clipX, clipY, clipW, clipH);
+            gl.clearColor(0.2, 0.14, 0.26, 1);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            var bossFillW = Math.floor(bossBarFullW * bossHpRatio);
+            if (bossFillW > 0) {
+              var fillClipW = Math.max(1, Math.min(renderW - clipX, Math.min(clipW, bossFillW - Math.max(0, clipX - bossBarX))));
+              if (fillClipW > 0) {
+                gl.scissor(clipX, clipY, fillClipW, clipH);
+                gl.clearColor(0.9, 0.26, 0.8, 1);
+                gl.clear(gl.COLOR_BUFFER_BIT);
+              }
+            }
+          }
+          gl.disable(gl.SCISSOR_TEST);
+        }
+      }
+
+      // 敌人目标血条（普通小条，Boss 主要看顶部 Boss 条）
+      gl.enable(gl.SCISSOR_TEST);
+      for (i = 0; i < enemies.length; i++) {
+        var en = enemies[i];
+        if (!en || en.boss) continue;
+        if (!projectScreenPos(enemyBarPos, en.x, en.y + (en.r || 0.5) * 1.15, en.z)) continue;
+        var eHpRatio = Math.max(0, Math.min(1, (en.hp || 0) / Math.max(1, en.hpMax || 1)));
+        var barW = Math.max(36, Math.floor((en.r || 0.5) * 42));
+        var barH = 5;
+        var bx = Math.floor(enemyBarPos[0] - barW * 0.5);
+        var by = Math.floor(enemyBarPos[1] + 10);
+        if (bx < 0 || bx > renderW - 2 || by < 0 || by > renderH - 2) continue;
+        gl.scissor(Math.max(0, bx), Math.max(0, by), Math.max(1, Math.min(renderW - bx, barW)), barH);
+        gl.clearColor(0.18, 0.2, 0.24, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.scissor(Math.max(0, bx), Math.max(0, by), Math.max(1, Math.min(renderW - bx, Math.floor(barW * eHpRatio))), barH);
+        gl.clearColor(0.98, 0.35, 0.35, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+      }
       gl.disable(gl.SCISSOR_TEST);
     }
 
