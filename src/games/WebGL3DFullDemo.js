@@ -1256,6 +1256,12 @@ function run() {
   var shieldTimer = 0;
   var combo = 0;
   var comboTimer = 0;
+  var skillCharge = 0;
+  var SKILL_MAX = 100;
+  var lastSkillTapTs = 0;
+  var lastSkillTapX = 0;
+  var lastSkillTapY = 0;
+  var skillReadyToastShown = false;
   var score = 0;
   var needScore = 35;
   var hp = 7;
@@ -1266,6 +1272,8 @@ function run() {
   var bossShootCycle = 0;
   var drops = [];
   var dropSpawnT = 0;
+  var damageNumbers = [];
+  var damageTextTexCache = {};
   var enemyBallTextures = {};
   var enemyBulletTexNormal = null;
   var enemyBulletTexBoss = null;
@@ -1279,6 +1287,8 @@ function run() {
   // 机翼高度差：正值抬右压左，负值抬左压右
   var playerWingBalanceY = 0;
   var worldTravelX = 0;
+  var camShakeT = 0;
+  var camShakeAmp = 0;
   var gameOver = false;
   var gameStarted = false;
   var startAt = Date.now();
@@ -1320,6 +1330,10 @@ function run() {
   var homeIntroLabelTex = gl.createTexture();
   var homeStartLabelOk = false;
   var homeIntroLabelOk = false;
+  var pauseTitleTex = gl.createTexture();
+  var pauseHintTex = gl.createTexture();
+  var pauseTitleOk = false;
+  var pauseHintOk = false;
   var uiQuadUV = new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]);
   var bUiQuad = makeBuffer(gl, uiQuadUV);
 
@@ -1535,6 +1549,11 @@ function run() {
   function buildHomeButtonLabelTextures() {
     homeStartLabelOk = buildHomeLabelTexture(homeStartLabelTex, '开始游戏', 'rgba(232,246,235,0.99)', 512, 128, 64);
     homeIntroLabelOk = buildHomeLabelTexture(homeIntroLabelTex, '游戏介绍', 'rgba(228,238,255,0.99)', 512, 112, 56);
+  }
+
+  function buildPauseTextTextures() {
+    pauseTitleOk = buildHomeLabelTexture(pauseTitleTex, '游戏已暂停', 'rgba(255,220,170,0.98)', 560, 118, 56);
+    pauseHintOk = buildHomeLabelTexture(pauseHintTex, '轻触屏幕任意处继续', 'rgba(218,226,248,0.96)', 760, 112, 44);
   }
 
   function drawUiTexRegion(uvMinU, uvMinV, uvMaxU, uvMaxV, cx, cy, hw, hh) {
@@ -1838,8 +1857,62 @@ function run() {
     powerupTexShield = buildPowerupTexture('shield');
   }
 
+  function buildDamageTextTexture(text, isBoss) {
+    var key = String(text) + (isBoss ? '_b' : '_n');
+    if (damageTextTexCache[key]) return damageTextTexCache[key];
+    var s = 128;
+    var oc = wx.createOffscreenCanvas
+      ? wx.createOffscreenCanvas({ type: '2d', width: s, height: s })
+      : wx.createCanvas();
+    oc.width = s;
+    oc.height = s;
+    var c2 = oc.getContext('2d');
+    if (!c2) return null;
+    c2.clearRect(0, 0, s, s);
+    c2.textAlign = 'center';
+    c2.textBaseline = 'middle';
+    c2.shadowColor = 'rgba(0,0,0,0.55)';
+    c2.shadowBlur = 6;
+    c2.shadowOffsetX = 0;
+    c2.shadowOffsetY = 2;
+    c2.lineWidth = 5;
+    c2.strokeStyle = 'rgba(8,12,20,0.9)';
+    c2.font = 'bold 56px sans-serif';
+    c2.fillStyle = isBoss ? '#FFC470' : '#FFFFFF';
+    c2.strokeText(String(text), s * 0.5, s * 0.5);
+    c2.fillText(String(text), s * 0.5, s * 0.5);
+
+    var tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, oc);
+    damageTextTexCache[key] = tex;
+    return tex;
+  }
+
+  function showDamageNumber(x, y, z, damage, isBoss) {
+    var txt = damage >= 1 ? String(damage | 0) : String(Math.max(0.1, Math.round(damage * 10) / 10));
+    var tex = buildDamageTextTexture(txt, !!isBoss);
+    if (!tex) return;
+    damageNumbers.push({
+      x: x + (Math.random() * 2 - 1) * 0.08,
+      y: y + (isBoss ? 0.9 : 0.55),
+      z: z,
+      life: 0.85,
+      t: 0,
+      tex: tex,
+      boss: !!isBoss
+    });
+    if (damageNumbers.length > 48) damageNumbers.splice(0, damageNumbers.length - 48);
+  }
+
   buildUiAtlasTexture();
   buildHomeButtonLabelTextures();
+  buildPauseTextTextures();
   buildEnemyBallTextures();
   buildEnemyBulletTextures();
   buildPowerupTextures();
@@ -1853,6 +1926,8 @@ function run() {
     var enemyRadius = (isElite ? 0.72 : 0.56) + Math.random() * (isElite ? 0.12 : 0.1);
     var hpBase = isElite ? 3 : 1;
     var typeCfg = ENEMY_TYPE_CONFIGS[(Math.random() * ENEMY_TYPE_CONFIGS.length) | 0];
+    var moveTypeRoll = Math.random();
+    var moveType = moveTypeRoll < 0.36 ? 'straight' : (moveTypeRoll < 0.64 ? 'snake' : (moveTypeRoll < 0.84 ? 'circle' : 'rush'));
     enemies.push({
       x: playerX + (Math.random() * 2 - 1) * 3.0,
       z: -10 - Math.random() * 2.2,
@@ -1873,6 +1948,9 @@ function run() {
       highlightColor: typeCfg.highlight,
       midColor: typeCfg.mid,
       edgeColor: typeCfg.edge,
+      moveType: moveType,
+      baseX: playerX + (Math.random() * 2 - 1) * 3.0,
+      baseY: playerY + (Math.random() * 2 - 1) * 0.45 + 0.06,
       flashT: 0,
       taunt: hasTaunt ? enemyTaunts[(Math.random() * enemyTaunts.length) | 0] : ''
     });
@@ -1948,6 +2026,34 @@ function run() {
       shieldTimer = Math.max(shieldTimer, 0) + 5.5;
       wx.showToast({ title: '护盾 +5.5s', icon: 'none', duration: 500 });
     }
+  }
+
+  function addSkillCharge(v) {
+    if (!isFinite(v) || v <= 0) return;
+    var prev = skillCharge;
+    skillCharge = Math.min(SKILL_MAX, skillCharge + v);
+    if (prev < SKILL_MAX && skillCharge >= SKILL_MAX && !skillReadyToastShown) {
+      skillReadyToastShown = true;
+      wx.showToast({ title: '技能已就绪（双击释放）', icon: 'none', duration: 700 });
+    }
+  }
+
+  function activateSkill() {
+    if (skillCharge < SKILL_MAX || !gameStarted || gameOver || paused) return false;
+    skillCharge = 0;
+    skillReadyToastShown = false;
+    var i;
+    for (i = 0; i < enemies.length; i++) {
+      var e = enemies[i];
+      if (!e) continue;
+      e.hp -= e.boss ? 10 : 4;
+      e.flashT = 0.14;
+      showDamageNumber(e.x, e.y, e.z, e.boss ? 10 : 4, !!e.boss);
+    }
+    enemyBullets = [];
+    camShakeAmp = Math.min(0.28, camShakeAmp + 0.16);
+    wx.showToast({ title: '清屏冲击！', icon: 'none', duration: 600 });
+    return true;
   }
 
   function chooseAimTarget(x, y, z) {
@@ -2137,6 +2243,18 @@ var dragAnchorPlayerY = 0;
       var p = readPointerPosFromEvent(e);
       if (!p) return;
       if (p.x > w - 56 && p.y < 56) return;
+      var nowTap = Date.now();
+      var dxTap = p.x - lastSkillTapX;
+      var dyTap = p.y - lastSkillTapY;
+      if (nowTap - lastSkillTapTs < 260 && dxTap * dxTap + dyTap * dyTap < 42 * 42) {
+        if (activateSkill()) {
+          lastSkillTapTs = 0;
+          return;
+        }
+      }
+      lastSkillTapTs = nowTap;
+      lastSkillTapX = p.x;
+      lastSkillTapY = p.y;
       var np = normalizePointerToWindow(p);
       if (np) {
         pointerDragging = true;
@@ -2181,6 +2299,20 @@ var dragAnchorPlayerY = 0;
     if (gameStarted && !gameOver && x > w - 56 && y < 56) {
       paused = true;
       return;
+    }
+    if (gameStarted && !gameOver && !paused) {
+      var nowTap = Date.now();
+      var dxTap = x - lastSkillTapX;
+      var dyTap = y - lastSkillTapY;
+      if (nowTap - lastSkillTapTs < 260 && dxTap * dxTap + dyTap * dyTap < 42 * 42) {
+        if (activateSkill()) {
+          lastSkillTapTs = 0;
+          return;
+        }
+      }
+      lastSkillTapTs = nowTap;
+      lastSkillTapX = x;
+      lastSkillTapY = y;
     }
     if (gameOver) return;
     // 开始拖动
@@ -2530,6 +2662,7 @@ var dragAnchorPlayerY = 0;
     enemyBullets = [];
     enemies = [];
     drops = [];
+    damageNumbers = [];
     muzzleFx = [];
     playerX = 0;
     targetPlayerX = 0;
@@ -2546,6 +2679,9 @@ var dragAnchorPlayerY = 0;
     lastMapChunkIx = 0;
     lastMapChunkIy = 0;
     score = 0;
+    skillCharge = 0;
+    skillReadyToastShown = false;
+    lastSkillTapTs = 0;
     hp = MAX_HP;
     bulletLevel = 1;
     shieldTimer = 0;
@@ -2555,6 +2691,7 @@ var dragAnchorPlayerY = 0;
     dropSpawnT = 0;
     buildUiAtlasTexture();
     buildHomeButtonLabelTextures();
+    buildPauseTextTextures();
   }
 
   function drawHomeOverlay() {
@@ -2621,7 +2758,8 @@ var dragAnchorPlayerY = 0;
     gl.enableVertexAttribArray(locHud.pos);
     gl.enableVertexAttribArray(locHud.col);
     gl.drawArrays(gl.TRIANGLES, 0, nPauseDimVerts);
-    // 暂停文案在部分模拟器/真机上存在 atlas 采样错位，先禁用该层避免出现乱码块
+    // 暂停文案改为独立纹理，彻底规避 atlas UV 串采样
+    // 暂停文案纹理在部分端仍有异常采样，先禁用该层，保留遮罩与点击继续逻辑
     gl.disable(gl.BLEND);
     gl.enable(gl.CULL_FACE);
     gl.enable(gl.DEPTH_TEST);
@@ -2663,6 +2801,7 @@ var dragAnchorPlayerY = 0;
     bullets = [];
     enemyBullets = [];
     enemies = [];
+    damageNumbers = [];
     muzzleFx = [];
     spawnT = 0;
     spawnCount = 0;
@@ -2672,6 +2811,9 @@ var dragAnchorPlayerY = 0;
     shieldTimer = 0;
     combo = 0;
     comboTimer = 0;
+    skillCharge = 0;
+    skillReadyToastShown = false;
+    lastSkillTapTs = 0;
     bossActive = false;
     bossDefeated = false;
     bossShootCycle = 0;
@@ -2725,7 +2867,16 @@ var dragAnchorPlayerY = 0;
       // 纵向也固定镜头，避免相机跟随抵消“移动到顶部”的视觉效果
       camLookY = 0.25;
     }
-    lookAt(view, camX, 5.7, 1.85, camX, camLookY, -6.6, 0, 1, 0);
+    var shakeX = 0;
+    var shakeY = 0;
+    if (camShakeAmp > 0.0001) {
+      camShakeT += dt * 50;
+      shakeX = Math.sin(camShakeT * 0.9) * camShakeAmp;
+      shakeY = Math.cos(camShakeT * 1.17) * camShakeAmp * 0.72;
+      camShakeAmp *= Math.pow(0.08, dt);
+      if (camShakeAmp < 0.0001) camShakeAmp = 0;
+    }
+    lookAt(view, camX + shakeX, 5.7 + shakeY, 1.85, camX + shakeX * 0.5, camLookY + shakeY * 0.2, -6.6, 0, 1, 0);
     mul4(vp, proj, view);
 
     var starSpd = 2.8;
@@ -2870,8 +3021,22 @@ var dragAnchorPlayerY = 0;
           enemies[i].x = Math.max(-3.6, Math.min(3.6, enemies[i].x));
           enemies[i].y = Math.max(-1.3, Math.min(1.9, enemies[i].y));
         } else {
-          // 普通目标轻微回中，避免从中间一路漂移到屏幕外
-          enemies[i].x += (playerX - enemies[i].x) * dt * 0.26;
+          var mt = enemies[i].moveType || 'straight';
+          if (mt === 'snake') {
+            enemies[i].x += Math.sin(enemies[i].gait * 1.5 + i * 0.6) * dt * 1.08;
+            enemies[i].y += Math.cos(enemies[i].gait * 1.15 + i * 0.3) * dt * 0.16;
+          } else if (mt === 'circle') {
+            var bx = enemies[i].baseX || enemies[i].x;
+            var by = enemies[i].baseY || enemies[i].y;
+            enemies[i].x = bx + Math.cos(enemies[i].gait * 0.9 + i) * 0.9;
+            enemies[i].y = by + Math.sin(enemies[i].gait * 0.95 + i) * 0.36;
+          } else if (mt === 'rush') {
+            enemies[i].x += (playerX - enemies[i].x) * dt * 0.78;
+            enemies[i].y += (playerY - enemies[i].y) * dt * 0.42;
+          } else {
+            // straight：轻微回中，避免从中间一路漂移到屏幕外
+            enemies[i].x += (playerX - enemies[i].x) * dt * 0.24;
+          }
           enemies[i].x = Math.max(-3.4, Math.min(3.4, enemies[i].x));
           enemies[i].y = Math.max(-1.55, Math.min(1.85, enemies[i].y));
         }
@@ -2966,8 +3131,18 @@ var dragAnchorPlayerY = 0;
         if (pdx * pdx + pdy * pdy * 1.08 + pdz * pdz < playerHitR * playerHitR) {
           enemyBullets.splice(i, 1);
           hp -= shieldTimer > 0 ? 0.15 : 0.45;
+          camShakeAmp = Math.min(0.22, camShakeAmp + (shieldTimer > 0 ? 0.035 : 0.08));
           if (hp <= 0) endGame(false);
         }
+      }
+
+      for (i = damageNumbers.length - 1; i >= 0; i--) {
+        var dn = damageNumbers[i];
+        dn.life -= dt;
+        dn.t += dt;
+        dn.y += dt * (dn.boss ? 0.65 : 0.5);
+        dn.z += dt * 0.35;
+        if (dn.life <= 0) damageNumbers.splice(i, 1);
       }
 
       for (i = drops.length - 1; i >= 0; i--) {
@@ -3008,8 +3183,10 @@ var dragAnchorPlayerY = 0;
               if (bulletLevel >= 4) bossDmg = 0.5;
               else if (bulletLevel >= 2 || powerTimer > 0) bossDmg = 0.34;
               e.hp -= bossDmg;
+              showDamageNumber(e.x, e.y, e.z, bossDmg, true);
             } else {
               e.hp -= 1;
+              showDamageNumber(e.x, e.y, e.z, 1, false);
             }
             e.flashT = 0.08;
             break;
@@ -3022,10 +3199,12 @@ var dragAnchorPlayerY = 0;
           var mul = 1 + Math.min(4, (combo / 10) | 0) * 0.2;
           enemies.splice(i, 1);
           score += Math.floor(scoreGain * mul);
+          addSkillCharge(e.boss ? 100 : (e.elite ? 16 : 6));
           maybeDropFromEnemy(e);
           if (e.boss) {
             bossActive = false;
             bossDefeated = true;
+            camShakeAmp = Math.min(0.26, camShakeAmp + 0.18);
             wx.showToast({ title: 'Boss 击破！', icon: 'none', duration: 900 });
           }
           if (e.elite) {
@@ -3185,6 +3364,36 @@ var dragAnchorPlayerY = 0;
     for (i = 0; i < enemies.length; i++) {
       drawEnemyEmoji(enemies[i], now, i);
     }
+    for (i = 0; i < damageNumbers.length; i++) {
+      var dnDraw = damageNumbers[i];
+      if (!dnDraw || !dnDraw.tex) continue;
+      var dnPulse = 1 + Math.sin(now * 0.012 + dnDraw.t * 8) * 0.04;
+      var dnHalf = (dnDraw.boss ? 0.3 : 0.22) * dnPulse;
+      billboardFacingCamera(dnDraw.x, dnDraw.y, dnDraw.z, 0, 0, billRight, billUp);
+      gl.useProgram(pBill);
+      gl.disable(gl.CULL_FACE);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.depthMask(false);
+      gl.bindBuffer(gl.ARRAY_BUFFER, bBillboard);
+      gl.vertexAttribPointer(locBill.local, 2, gl.FLOAT, false, 16, 0);
+      gl.vertexAttribPointer(locBill.uv, 2, gl.FLOAT, false, 16, 8);
+      gl.enableVertexAttribArray(locBill.local);
+      gl.enableVertexAttribArray(locBill.uv);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, dnDraw.tex);
+      gl.uniform1i(locBill.tex, 0);
+      gl.uniform1f(locBill.chromaOn, 0.0);
+      gl.uniform3f(locBill.center, dnDraw.x, dnDraw.y, dnDraw.z);
+      gl.uniform3fv(locBill.right, billRight);
+      gl.uniform3fv(locBill.up, billUp);
+      gl.uniform1f(locBill.halfW, dnHalf);
+      gl.uniform1f(locBill.halfH, dnHalf);
+      gl.uniformMatrix4fv(locBill.mvp, false, vp);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      gl.depthMask(true);
+      gl.disable(gl.BLEND);
+    }
 
     drawPauseButtonInGame();
 
@@ -3222,6 +3431,61 @@ var dragAnchorPlayerY = 0;
       var pgBarY = Math.max(0, renderH - Math.round(36 * uiScaleY));
       gl.scissor(pgBarX, pgBarY, pgBarW, pgBarH);
       gl.clearColor(0.95, 0.78, 0.2, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.disable(gl.SCISSOR_TEST);
+
+      var skillRatio = Math.max(0, Math.min(1, skillCharge / SKILL_MAX));
+      var pSkillCenter = [0, 0];
+      var pSkillTop = [0, 0];
+      var pSkillRight = [0, 0];
+      var hasPSkillCenter = projectScreenPos(pSkillCenter, playerX, playerY, playerZ);
+      var hasPSkillTop = projectScreenPos(pSkillTop, playerX, playerY + 0.62, playerZ);
+      var hasPSkillRight = projectScreenPos(pSkillRight, playerX + 0.52, playerY, playerZ);
+      var skillAnchorX = hasPSkillCenter ? pSkillCenter[0] : Math.round(renderW * 0.5);
+      var skillAnchorY = hasPSkillTop ? pSkillTop[1] : (hasPSkillCenter ? (pSkillCenter[1] + 28) : Math.round(renderH * 0.2));
+      var skillScreenHalf = hasPSkillRight && hasPSkillCenter
+        ? Math.abs(pSkillRight[0] - pSkillCenter[0])
+        : Math.max(34, Math.floor(72 * uiScaleX));
+      var skillBarFullW = Math.max(74, Math.min(Math.floor(renderW * 0.24), Math.floor(skillScreenHalf * 1.9)));
+      var skillBarH = Math.max(2, Math.round(4 * uiScaleY));
+      var skillBarX = Math.floor(skillAnchorX - skillBarFullW * 0.5);
+      var skillBarY = Math.floor(skillAnchorY + Math.max(10, Math.min(24, skillScreenHalf * 0.2)));
+      var skillSafeXMin = Math.round(8 * uiScaleX);
+      var skillSafeXMax = Math.max(skillSafeXMin, renderW - skillBarFullW - skillSafeXMin);
+      var skillSafeYMin = Math.round(8 * uiScaleY);
+      var skillSafeYMax = Math.max(skillSafeYMin, renderH - skillBarH - Math.round(10 * uiScaleY));
+      skillBarX = Math.max(skillSafeXMin, Math.min(skillSafeXMax, skillBarX));
+      skillBarY = Math.max(skillSafeYMin, Math.min(skillSafeYMax, skillBarY));
+      gl.enable(gl.SCISSOR_TEST);
+      // 技能条做成“能量槽”视觉：紫色底框 + 亮蓝核心，避免被误认成血条
+      var skillOuterX = skillBarX - 1;
+      var skillOuterY = skillBarY - 1;
+      var skillOuterW = skillBarFullW + 2;
+      var skillOuterH = skillBarH + 2;
+      gl.scissor(skillOuterX, skillOuterY, Math.max(1, Math.min(renderW - skillOuterX, skillOuterW)), Math.max(1, Math.min(renderH - skillOuterY, skillOuterH)));
+      gl.clearColor(0.35, 0.16, 0.52, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.scissor(skillBarX, skillBarY, Math.max(1, Math.min(renderW - skillBarX, skillBarFullW)), skillBarH);
+      gl.clearColor(0.08, 0.1, 0.2, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      var skillFillW = Math.floor(skillBarFullW * skillRatio);
+      if (skillFillW > 0) {
+        gl.scissor(skillBarX, skillBarY, Math.max(1, Math.min(renderW - skillBarX, skillFillW)), skillBarH);
+        if (skillRatio >= 0.999) {
+          var readyPulse = 0.75 + Math.sin(now * 0.024) * 0.25;
+          gl.clearColor(0.45 + readyPulse * 0.2, 0.95, 1.0, 1);
+        } else {
+          gl.clearColor(0.16, 0.84, 0.98, 1);
+        }
+        gl.clear(gl.COLOR_BUFFER_BIT);
+      }
+      // 右上角“就绪指示灯”
+      var skillLampS = Math.max(2, Math.round(4 * uiScaleY));
+      var skillLampX = skillBarX + skillBarFullW + Math.max(2, Math.round(2 * uiScaleX));
+      var skillLampY = skillBarY + Math.max(0, Math.round((skillBarH - skillLampS) * 0.5));
+      gl.scissor(skillLampX, skillLampY, Math.max(1, Math.min(renderW - skillLampX, skillLampS)), Math.max(1, Math.min(renderH - skillLampY, skillLampS)));
+      if (skillRatio >= 0.999) gl.clearColor(0.9, 1.0, 0.55, 1);
+      else gl.clearColor(0.28, 0.32, 0.4, 1);
       gl.clear(gl.COLOR_BUFFER_BIT);
       gl.disable(gl.SCISSOR_TEST);
 
