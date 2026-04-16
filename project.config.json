@@ -64,7 +64,20 @@
   },
   "simulatorPluginLibVersion": {},
   "packOptions": {
-    "ignore": [],
+    "ignore": [
+      {
+        "type": "file",
+        "value": "nul"
+      },
+      {
+        "type": "glob",
+        "value": "pages/**"
+      },
+      {
+        "type": "glob",
+        "value": "**/*.md"
+      }
+    ],
     "include": []
   },
   "isGameTourist": false

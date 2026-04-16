@@ -1,4 +1,97 @@
 page {
-  background: #111;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   color: #fff;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.home-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 40rpx;
+  width: 100%;
+  max-width: 600rpx;
+}
+
+.game-title {
+  margin-bottom: 80rpx;
+}
+
+.title-text {
+  font-size: 72rpx;
+  font-weight: bold;
+  margin-bottom: 20rpx;
+  text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+  display: block;
+}
+
+.subtitle-text {
+  font-size: 28rpx;
+  opacity: 0.9;
+  text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.3);
+  display: block;
+}
+
+.start-button-area {
+  margin-bottom: 100rpx;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+}
+
+.start-button {
+  width: 300rpx;
+  height: 80rpx;
+  background: linear-gradient(45deg, #ff6b6b, #ff8e53);
+  border-radius: 40rpx;
+  border: none;
+  box-shadow: 0 8px 20px rgba(255, 107, 107, 0.3);
+  transition: all 0.3s ease;
+}
+
+.start-button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 25px rgba(255, 107, 107, 0.4);
+}
+
+.start-button:active {
+  transform: translateY(0);
+  box-shadow: 0 4px 10px rgba(255, 107, 107, 0.3);
+}
+
+.button-text {
+  font-size: 32rpx;
+  font-weight: bold;
+  color: #fff;
+}
+
+.game-features {
+  display: flex;
+  justify-content: space-around;
+  width: 100%;
+  margin-top: 40rpx;
+}
+
+.feature-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  opacity: 0.9;
+}
+
+.feature-icon {
+  font-size: 48rpx;
+  margin-bottom: 16rpx;
+}
+
+.feature-text {
+  font-size: 24rpx;
+  opacity: 0.8;
 }
