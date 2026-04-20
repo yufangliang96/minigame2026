@@ -418,10 +418,12 @@ var FSH_UITEX = [
   'precision mediump float;',
   'varying vec2 vUV;',
   'uniform sampler2D uTex;',
+  'uniform float uGlobalAlpha;',
   'void main(){',
   '  vec4 c = texture2D(uTex, vUV);',
-  '  if (c.a < 0.04) discard;',
-  '  gl_FragColor = c;',
+  '  float a = c.a * uGlobalAlpha;',
+  '  if (a < 0.02) discard;',
+  '  gl_FragColor = vec4(c.rgb, a);',
   '}'
 ].join('');
 
@@ -600,7 +602,8 @@ function run() {
     tex: gl.getUniformLocation(pUiTex, 'uTex'),
     uvRect: gl.getUniformLocation(pUiTex, 'uUvRect'),
     ndc: gl.getUniformLocation(pUiTex, 'uNdc'),
-    rot: gl.getUniformLocation(pUiTex, 'uRot')
+    rot: gl.getUniformLocation(pUiTex, 'uRot'),
+    globalAlpha: gl.getUniformLocation(pUiTex, 'uGlobalAlpha')
   };
 
   gl.enable(gl.DEPTH_TEST);
@@ -763,6 +766,11 @@ function run() {
     );
   }
   loadBgAtIndex(bgIndex);
+
+  var introDeepTex = gl.createTexture();
+  var introEarthTex = gl.createTexture();
+  var introTitleLineTex = gl.createTexture();
+  var introFighterPickTex = [gl.createTexture(), gl.createTexture(), gl.createTexture()];
 
   var playerTex = gl.createTexture();
   var playerLoaded = false;
@@ -1129,6 +1137,35 @@ function run() {
   }
   loadPlayerAssetAt(0);
 
+  function loadPlayerForMenuChoice(choiceIx) {
+    var paths = ['assets/player/01.png', 'assets/player/02.png', 'assets/player/03.png'];
+    var rel = paths[Math.max(0, Math.min(2, choiceIx))];
+    loadImageFromPackage(
+      packageImagePathVariants(rel),
+      function(im) {
+        var iw = im.width || 1;
+        var ih = im.height || 1;
+        if (imageLooksLikeFullSceneNotFighter(iw, ih)) return;
+        playerImgAspect = ih / iw;
+        gl.bindTexture(gl.TEXTURE_2D, playerTex);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
+        bindPlayerTextureParams();
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, scrubPlayerCyanMarker(im));
+        playerVisualAutoRollDeg = calibratePlayerVisualBaseDeg(im);
+        if (!isFinite(playerVisualAutoRollDeg)) playerVisualAutoRollDeg = 0;
+        playerLoaded = true;
+        playerUsesProceduralTex = false;
+      },
+      function() {}
+    );
+  }
+
+  function beginIntroTakeoff(choiceIx) {
+    selectedFighterIx = Math.max(0, Math.min(2, choiceIx | 0));
+    loadPlayerForMenuChoice(selectedFighterIx);
+    setIntroPhase('takeoff');
+  }
+
   function buildHomeHudVerts() {
     var q = [];
     function quad(ax, ay, bx, by, r, g, b, a) {
@@ -1316,6 +1353,39 @@ function run() {
   };
   var homeStartPressedUntil = 0;
   var homeIntroPressedUntil = 0;
+
+  var introMode = 'cinematic';
+  var introPhaseStartMs = Date.now();
+  var introTitleOk = false;
+  var introEarthOk = false;
+  var selectedFighterIx = 0;
+  var INTRO_CINEMA_S = 7.2;
+  var INTRO_TITLE_S = 2.55;
+  var INTRO_TAKEOFF_S = 1.42;
+  var fighterPickHit = [
+    { x: 0, y: 0, width: 0, height: 0 },
+    { x: 0, y: 0, width: 0, height: 0 },
+    { x: 0, y: 0, width: 0, height: 0 }
+  ];
+
+  function setIntroPhase(mode) {
+    introMode = mode;
+    introPhaseStartMs = Date.now();
+  }
+
+  function introPhaseElapsedSec() {
+    return (Date.now() - introPhaseStartMs) / 1000;
+  }
+
+  function easeInOutCubic(t) {
+    t = Math.max(0, Math.min(1, t));
+    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  }
+
+  function smoothstep01(edge0, edge1, x) {
+    var t = Math.max(0, Math.min(1, (x - edge0) / Math.max(1e-6, edge1 - edge0)));
+    return t * t * (3 - 2 * t);
+  }
 
   var UI_ATLAS_W = 768;
   var UI_ATLAS_H = 640;
@@ -1551,6 +1621,238 @@ function run() {
     homeIntroLabelOk = buildHomeLabelTexture(homeIntroLabelTex, '游戏介绍', 'rgba(228,238,255,0.99)', 512, 112, 56);
   }
 
+  function buildIntroDeepFallback() {
+    var W = 512;
+    var H = 768;
+    var oc =
+      wx.createOffscreenCanvas && wx.createOffscreenCanvas({ type: '2d', width: W, height: H });
+    if (!oc && wx.createCanvas) {
+      try {
+        oc = wx.createCanvas();
+        oc.width = W;
+        oc.height = H;
+      } catch (e) {}
+    }
+    if (!oc) return;
+    var c2 = oc.getContext('2d');
+    if (!c2) return;
+    var g = c2.createRadialGradient(W * 0.32, H * 0.22, 0, W * 0.52, H * 0.48, Math.max(W, H) * 0.95);
+    g.addColorStop(0, '#2a3b78');
+    g.addColorStop(0.35, '#121a3d');
+    g.addColorStop(0.72, '#070b1c');
+    g.addColorStop(1, '#020308');
+    c2.fillStyle = g;
+    c2.fillRect(0, 0, W, H);
+    c2.globalCompositeOperation = 'lighter';
+    var k;
+    for (k = 0; k < 5; k++) {
+      var gx = W * (0.15 + Math.random() * 0.7);
+      var gy = H * (0.1 + Math.random() * 0.65);
+      var rr = 40 + Math.random() * 120;
+      var ng = c2.createRadialGradient(gx, gy, 0, gx, gy, rr);
+      var hue = 200 + Math.random() * 80;
+      ng.addColorStop(0, 'hsla(' + hue + ',70%,62%,0.22)');
+      ng.addColorStop(1, 'hsla(' + hue + ',50%,40%,0)');
+      c2.fillStyle = ng;
+      c2.fillRect(0, 0, W, H);
+    }
+    c2.globalCompositeOperation = 'source-over';
+    gl.bindTexture(gl.TEXTURE_2D, introDeepTex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, oc);
+  }
+
+  function buildIntroEarthFallback() {
+    var W = 512;
+    var H = 768;
+    var oc =
+      wx.createOffscreenCanvas && wx.createOffscreenCanvas({ type: '2d', width: W, height: H });
+    if (!oc && wx.createCanvas) {
+      try {
+        oc = wx.createCanvas();
+        oc.width = W;
+        oc.height = H;
+      } catch (e) {}
+    }
+    if (!oc) return;
+    var c2 = oc.getContext('2d');
+    if (!c2) return;
+    c2.clearRect(0, 0, W, H);
+    var cy = H * 0.92;
+    var rx = W * 0.55;
+    var ry = H * 0.38;
+    var eg = c2.createRadialGradient(W * 0.5, cy, rx * 0.08, W * 0.5, cy, rx * 1.05);
+    eg.addColorStop(0, 'rgba(110,180,255,0.95)');
+    eg.addColorStop(0.35, 'rgba(40,90,180,0.88)');
+    eg.addColorStop(0.65, 'rgba(12,40,100,0.72)');
+    eg.addColorStop(1, 'rgba(4,12,40,0)');
+    c2.fillStyle = eg;
+    c2.save();
+    c2.translate(W * 0.5, cy);
+    c2.scale(rx, ry);
+    c2.beginPath();
+    c2.arc(0, 0, 1, 0, Math.PI * 2);
+    c2.fill();
+    c2.restore();
+    c2.fillStyle = 'rgba(30,120,90,0.55)';
+    c2.beginPath();
+    c2.arc(W * 0.5, cy - ry * 0.08, rx * 0.42, 0, Math.PI * 2);
+    c2.fill();
+    c2.strokeStyle = 'rgba(180,220,255,0.35)';
+    c2.lineWidth = 3;
+    c2.setLineDash([10, 14]);
+    c2.beginPath();
+    c2.arc(W * 0.5, cy - ry * 0.12, rx * 0.78, Math.PI * 1.05, Math.PI * 1.95);
+    c2.stroke();
+    c2.setLineDash([]);
+    gl.bindTexture(gl.TEXTURE_2D, introEarthTex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, oc);
+    introEarthOk = true;
+  }
+
+  function buildIntroFighterPickTexture(tex, hueShift) {
+    var PW = 128;
+    var PH = 160;
+    var px = new Uint8Array(PW * PH * 4);
+    var cx = (PW / 2) | 0;
+    var baseHue = (200 + hueShift * 120) % 360;
+    var y;
+    var x;
+    for (y = 0; y < PH; y++) {
+      for (x = 0; x < PW; x++) {
+        var i = (y * PW + x) * 4;
+        var nx = (x - cx) / PW;
+        var ny = (PH * 0.52 - y) / PH;
+        var wings = Math.abs(nx) < 0.4 && ny > -0.06 && ny < 0.14 && Math.abs(nx) > 0.09;
+        var body = Math.abs(nx) < 0.095 + ny * 0.22 && ny > -0.26 && ny < 0.4;
+        var tail = Math.abs(nx) < 0.17 && ny > -0.52 && ny < -0.1;
+        var glow = Math.abs(nx) < 0.06 && ny > 0.36 && ny < 0.48;
+        var r0 = 50 + baseHue * 0.08;
+        var g0 = 210 - hueShift * 40;
+        var b0 = 255 - hueShift * 30;
+        if (glow) {
+          px[i] = Math.min(255, r0 | 0);
+          px[i + 1] = Math.min(255, g0 | 0);
+          px[i + 2] = Math.min(255, b0 | 0);
+          px[i + 3] = 255;
+        } else if (wings) {
+          px[i] = 100 + (hueShift * 40) | 0;
+          px[i + 1] = 140;
+          px[i + 2] = 210;
+          px[i + 3] = 255;
+        } else if (body) {
+          px[i] = 228;
+          px[i + 1] = 232;
+          px[i + 2] = 248;
+          px[i + 3] = 255;
+        } else if (tail) {
+          px[i] = 88;
+          px[i + 1] = 108;
+          px[i + 2] = 158;
+          px[i + 3] = 255;
+        } else {
+          px[i] = 0;
+          px[i + 1] = 0;
+          px[i + 2] = 0;
+          px[i + 3] = 0;
+        }
+      }
+    }
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, PW, PH, 0, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  }
+
+  function tryLoadIntroImage(rel, tex, onOk) {
+    loadImageFromPackage(
+      packageImagePathVariants(rel),
+      function(im, tag) {
+        uploadBgFromImage(tex, im, tag);
+        if (onOk) onOk();
+      },
+      function() {}
+    );
+  }
+
+  function loadIntroPackageOverlays() {
+    tryLoadIntroImage('assets/intro/deepspace.jpg', introDeepTex, null);
+    tryLoadIntroImage('assets/intro/deepspace.png', introDeepTex, null);
+    tryLoadIntroImage('assets/intro/earth_base.png', introEarthTex, function() {
+      introEarthOk = true;
+    });
+    tryLoadIntroImage('assets/intro/earth_base.jpg', introEarthTex, function() {
+      introEarthOk = true;
+    });
+    var pickPaths = [
+      ['assets/intro/fighter1.png', 'assets/player/01.png'],
+      ['assets/intro/fighter2.png', 'assets/player/02.png'],
+      ['assets/intro/fighter3.png', 'assets/player/03.png']
+    ];
+    var pi;
+    for (pi = 0; pi < 3; pi++) {
+      (function(slot) {
+        var tryIdx = 0;
+        function nextTry() {
+          if (tryIdx >= pickPaths[slot].length) return;
+          var rel = pickPaths[slot][tryIdx++];
+          loadImageFromPackage(
+            packageImagePathVariants(rel),
+            function(im) {
+              var iw = im.width || 1;
+              var ih = im.height || 1;
+              if (imageLooksLikeFullSceneNotFighter(iw, ih)) {
+                nextTry();
+                return;
+              }
+              gl.bindTexture(gl.TEXTURE_2D, introFighterPickTex[slot]);
+              gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
+              gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+              gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+              gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+              gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+              gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, scrubPlayerCyanMarker(im));
+            },
+            function() {
+              nextTry();
+            }
+          );
+        }
+        nextTry();
+      })(pi);
+    }
+  }
+
+  function loadIntroAssets() {
+    buildIntroDeepFallback();
+    buildIntroEarthFallback();
+    var fi;
+    for (fi = 0; fi < 3; fi++) {
+      buildIntroFighterPickTexture(introFighterPickTex[fi], fi);
+    }
+    introTitleOk = buildHomeLabelTexture(
+      introTitleLineTex,
+      '地球轨道・第七联合基地',
+      'rgba(220,238,255,0.98)',
+      760,
+      96,
+      32
+    );
+    loadIntroPackageOverlays();
+  }
+
   function buildPauseTextTextures() {
     pauseTitleOk = buildHomeLabelTexture(pauseTitleTex, '游戏已暂停', 'rgba(255,220,170,0.98)', 560, 118, 56);
     pauseHintOk = buildHomeLabelTexture(pauseHintTex, '轻触屏幕任意处继续', 'rgba(218,226,248,0.96)', 760, 112, 44);
@@ -1572,17 +1874,21 @@ function run() {
     gl.uniform4f(locUiTex.uvRect, uvMinU, uvMinV, uvMaxU, uvMaxV);
     gl.uniform4f(locUiTex.ndc, cx, cy, hw, hh);
     gl.uniform2f(locUiTex.rot, 1, 0);
+    if (locUiTex.globalAlpha && locUiTex.globalAlpha >= 0) gl.uniform1f(locUiTex.globalAlpha, 1);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     if (locUiTex.uv >= 0) gl.disableVertexAttribArray(locUiTex.uv);
   }
 
-  function drawUiTexture(tex, cx, cy, hw, hh, rollRad) {
+  function drawUiTexture(tex, cx, cy, hw, hh, rollRad, globalAlpha) {
     var rr = rollRad || 0;
+    var ga = globalAlpha == null ? 1 : globalAlpha;
     if (locHud.pos >= 0) gl.disableVertexAttribArray(locHud.pos);
     if (locHud.col >= 0) gl.disableVertexAttribArray(locHud.col);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.useProgram(pUiTex);
+    gl.disable(gl.DEPTH_TEST);
+    gl.depthMask(false);
     gl.bindBuffer(gl.ARRAY_BUFFER, bUiQuad);
     gl.vertexAttribPointer(locUiTex.uv, 2, gl.FLOAT, false, 8, 0);
     gl.enableVertexAttribArray(locUiTex.uv);
@@ -1592,6 +1898,31 @@ function run() {
     gl.uniform4f(locUiTex.uvRect, 0, 0, 1, 1);
     gl.uniform4f(locUiTex.ndc, cx, cy, hw, hh);
     gl.uniform2f(locUiTex.rot, Math.cos(rr), Math.sin(rr));
+    if (locUiTex.globalAlpha && locUiTex.globalAlpha >= 0) gl.uniform1f(locUiTex.globalAlpha, ga);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    if (locUiTex.uv >= 0) gl.disableVertexAttribArray(locUiTex.uv);
+  }
+
+  function drawUiTextureRect(tex, cx, cy, hw, hh, minU, minV, maxU, maxV, rollRad, globalAlpha) {
+    var rr = rollRad || 0;
+    var ga = globalAlpha == null ? 1 : globalAlpha;
+    if (locHud.pos >= 0) gl.disableVertexAttribArray(locHud.pos);
+    if (locHud.col >= 0) gl.disableVertexAttribArray(locHud.col);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(pUiTex);
+    gl.disable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+    gl.bindBuffer(gl.ARRAY_BUFFER, bUiQuad);
+    gl.vertexAttribPointer(locUiTex.uv, 2, gl.FLOAT, false, 8, 0);
+    gl.enableVertexAttribArray(locUiTex.uv);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.uniform1i(locUiTex.tex, 0);
+    gl.uniform4f(locUiTex.uvRect, minU, minV, maxU, maxV);
+    gl.uniform4f(locUiTex.ndc, cx, cy, hw, hh);
+    gl.uniform2f(locUiTex.rot, Math.cos(rr), Math.sin(rr));
+    if (locUiTex.globalAlpha && locUiTex.globalAlpha >= 0) gl.uniform1f(locUiTex.globalAlpha, ga);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     if (locUiTex.uv >= 0) gl.disableVertexAttribArray(locUiTex.uv);
   }
@@ -1913,6 +2244,7 @@ function run() {
   buildUiAtlasTexture();
   buildHomeButtonLabelTextures();
   buildPauseTextTextures();
+  loadIntroAssets();
   buildEnemyBallTextures();
   buildEnemyBulletTextures();
   buildPowerupTextures();
@@ -2272,6 +2604,21 @@ var dragAnchorPlayerY = 0;
     var x = p.x;
     var y = p.y;
     if (!gameStarted && !gameOver) {
+      if (introMode === 'select') {
+        layoutFighterPickHit();
+        var pickI;
+        for (pickI = 0; pickI < 3; pickI++) {
+          var PR = fighterPickHit[pickI];
+          if (x >= PR.x && x <= PR.x + PR.width && y >= PR.y && y <= PR.y + PR.height) {
+            beginIntroTakeoff(pickI);
+            return;
+          }
+        }
+        return;
+      }
+      if (introMode !== 'idle') {
+        return;
+      }
       if (x >= homeBtn.x && x <= homeBtn.x + homeBtn.width && y >= homeBtn.y && y <= homeBtn.y + homeBtn.height) {
         homeStartPressedUntil = Date.now() + 120;
         startGame();
@@ -2692,10 +3039,105 @@ var dragAnchorPlayerY = 0;
     buildUiAtlasTexture();
     buildHomeButtonLabelTextures();
     buildPauseTextTextures();
+    setIntroPhase('cinematic');
+  }
+
+  function drawIntroBackdrop() {
+    gl.disable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+    gl.disable(gl.CULL_FACE);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    var zProg = introMode === 'cinematic' ? Math.min(1, introPhaseElapsedSec() / INTRO_CINEMA_S) : 1;
+    zProg = easeInOutCubic(zProg);
+    var zoom = 1.05 + zProg * 1.42;
+    var panU = Math.sin(zProg * Math.PI * 1.08) * 0.075 * (1 - zProg * 0.28);
+    var panV = zProg * 0.07 + Math.sin(zProg * 4.4) * 0.014 * (1 - zProg);
+    var half = 0.5 / Math.max(0.16, zoom);
+    var cx = 0.5 + panU;
+    var cy = 0.5 + panV;
+    var u0 = Math.max(0, Math.min(1, cx - half));
+    var u1 = Math.max(0, Math.min(1, cx + half));
+    var v0 = Math.max(0, Math.min(1, cy - half));
+    var v1 = Math.max(0, Math.min(1, cy + half));
+    drawUiTextureRect(introDeepTex, 0, 0, 1, 1, u0, v0, u1, v1, 0, 1);
+    if (introEarthOk) {
+      var earthA = introMode === 'cinematic' ? smoothstep01(0.38, 0.96, zProg) : 1;
+      drawUiTextureRect(introEarthTex, 0, 0, 1, 1, 0, 0, 1, 1, 0, earthA);
+    }
+    gl.disable(gl.BLEND);
+    gl.enable(gl.CULL_FACE);
+    gl.depthMask(true);
+    gl.enable(gl.DEPTH_TEST);
+    gl.useProgram(pMesh);
+  }
+
+  function layoutFighterPickHit() {
+    var rowY = h * 0.54;
+    var bw = Math.min(w * 0.26, 118);
+    var bh = Math.min(h * 0.15, 86);
+    var gap = Math.max(10, w * 0.035);
+    var total = 3 * bw + 2 * gap;
+    var x0 = (w - total) * 0.5;
+    var si;
+    for (si = 0; si < 3; si++) {
+      fighterPickHit[si].x = x0 + si * (bw + gap);
+      fighterPickHit[si].y = rowY;
+      fighterPickHit[si].width = bw;
+      fighterPickHit[si].height = bh;
+    }
+  }
+
+  function drawIntroChrome() {
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.CULL_FACE);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    var ph = introPhaseElapsedSec();
+    if (introMode === 'title' || introMode === 'select' || introMode === 'takeoff') {
+      var titleAlpha = 1;
+      if (introMode === 'title') titleAlpha = Math.max(0, Math.min(1, ph / 0.55));
+      if (introMode === 'takeoff') titleAlpha = Math.max(0, 1 - ph / INTRO_TAKEOFF_S);
+      if (introTitleOk && titleAlpha > 0.02) {
+        drawUiTexture(introTitleLineTex, 0, 0.68, 0.9, 0.056, 0, titleAlpha);
+      }
+    }
+    if (introMode === 'select') {
+      layoutFighterPickHit();
+      var fadeSel = Math.max(0, Math.min(1, ph / 0.48));
+      var pulse = 1 + Math.sin(homeFxT * 2.4) * 0.03;
+      var si;
+      for (si = 0; si < 3; si++) {
+        var R = fighterPickHit[si];
+        var cxN = ((R.x + R.width * 0.5) / w) * 2 - 1;
+        var cyN = 1 - ((R.y + R.height * 0.5) / h) * 2;
+        var hwN = (R.width / w) * 0.38 * pulse;
+        var hhN = (R.height / h) * 0.38 * pulse;
+        drawUiTexture(introFighterPickTex[si], cxN, cyN, hwN, hhN, 0, fadeSel);
+      }
+    }
+    if (introMode === 'takeoff') {
+      var tt = Math.max(0, Math.min(1, ph / INTRO_TAKEOFF_S));
+      layoutFighterPickHit();
+      var R = fighterPickHit[selectedFighterIx];
+      var rise = tt * 1.35;
+      var cxN = ((R.x + R.width * 0.5) / w) * 2 - 1;
+      var cyN = 1 - ((R.y + R.height * 0.5) / h) * 2 + rise;
+      var fade = 1 - tt;
+      drawUiTexture(introFighterPickTex[selectedFighterIx], cxN, cyN, 0.2, 0.24, 0, fade);
+    }
+    gl.disable(gl.BLEND);
+    gl.enable(gl.CULL_FACE);
+    gl.enable(gl.DEPTH_TEST);
+    gl.useProgram(pMesh);
   }
 
   function drawHomeOverlay() {
     if (gameStarted || gameOver) return;
+    if (introMode !== 'idle') {
+      drawIntroChrome();
+      return;
+    }
     gl.disable(gl.DEPTH_TEST);
     gl.disable(gl.CULL_FACE);
     gl.enable(gl.BLEND);
@@ -2858,6 +3300,17 @@ var dragAnchorPlayerY = 0;
       }
     }
 
+    if (!gameStarted && !gameOver && introMode !== 'idle') {
+      var iph = introPhaseElapsedSec();
+      if (introMode === 'cinematic' && iph >= INTRO_CINEMA_S) setIntroPhase('title');
+      else if (introMode === 'title' && iph >= INTRO_TITLE_S) setIntroPhase('select');
+      else if (introMode === 'takeoff' && iph >= INTRO_TAKEOFF_S) {
+        introMode = 'idle';
+        startGame();
+      }
+    }
+    var introBlocking = !gameStarted && !gameOver && introMode !== 'idle';
+
     persp(proj, Math.PI / 3.6, w / h, 0.1, 100);
     var camX = 0;
     var camLookY = 0.25;
@@ -2888,6 +3341,7 @@ var dragAnchorPlayerY = 0;
       starSpd = 5.2 * flowMul;
     }
     if (gameStarted && !gameOver && paused) starSpd = 0;
+    if (introBlocking && introMode === 'takeoff') starSpd = 12;
     for (i = 0; i < starCount; i++) {
       var zi = i * 3 + 2;
       stars[zi] += starSpd * dt;
@@ -3224,50 +3678,54 @@ var dragAnchorPlayerY = 0;
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
     // background image pass（必须 depthMask=false：否则全屏会把深度写成常数，后面整层 3D/精灵深度测试大面积失败）
-    gl.useProgram(pBg);
-    gl.disable(gl.DEPTH_TEST);
-    gl.depthMask(false);
-    gl.disable(gl.CULL_FACE);
-    gl.bindBuffer(gl.ARRAY_BUFFER, bBg);
-    gl.vertexAttribPointer(locBg.pos, 2, gl.FLOAT, false, 16, 0);
-    gl.vertexAttribPointer(locBg.uv, 2, gl.FLOAT, false, 16, 8);
-    gl.enableVertexAttribArray(locBg.pos);
-    gl.enableVertexAttribArray(locBg.uv);
-    var bgTexFrom = getBgTexture(bgCurrentTex);
-    var bgTexTo = getBgTexture(bgBlending ? bgNextTex : bgCurrentTex);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, bgTexFrom);
-    gl.uniform1i(locBg.texA, 0);
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, bgTexTo);
-    gl.uniform1i(locBg.texB, 1);
-    gl.uniform1f(locBg.blend, bgBlending ? bgBlend : 1);
-    gl.uniform1f(locBg.mix, bgLoaded ? 0.94 : 0.0);
-    // 首页轻微漂移；战斗中加大视差（仍限制在 clamp 内，用多频 sin 模拟纵深移动）
-    var du;
-    var dv;
-    if (gameStarted && !gameOver) {
-      du =
-        Math.sin(bgPanT * 0.86) * 0.094 +
-        Math.sin(bgPanT * 0.31) * 0.055 +
-        Math.cos(bgPanT * 0.46) * 0.032 +
-        Math.sin(worldTravelX * 0.068) * 0.118 +
-        (playerY - PLAYER_Y_DEFAULT) * 0.03;
-      dv =
-        Math.cos(bgPanT * 0.76) * 0.104 +
-        Math.sin(bgPanT * 0.43) * 0.058 +
-        Math.sin(bgPanT * 0.22) * 0.038 +
-        (playerY - PLAYER_Y_DEFAULT) * 0.034 -
-        Math.cos(worldTravelX * 0.044) * 0.044;
+    if (introBlocking) {
+      drawIntroBackdrop();
     } else {
-      du = Math.sin(bgPanT * 0.32) * 0.02;
-      dv = Math.cos(bgPanT * 0.24) * 0.016;
+      gl.useProgram(pBg);
+      gl.disable(gl.DEPTH_TEST);
+      gl.depthMask(false);
+      gl.disable(gl.CULL_FACE);
+      gl.bindBuffer(gl.ARRAY_BUFFER, bBg);
+      gl.vertexAttribPointer(locBg.pos, 2, gl.FLOAT, false, 16, 0);
+      gl.vertexAttribPointer(locBg.uv, 2, gl.FLOAT, false, 16, 8);
+      gl.enableVertexAttribArray(locBg.pos);
+      gl.enableVertexAttribArray(locBg.uv);
+      var bgTexFrom = getBgTexture(bgCurrentTex);
+      var bgTexTo = getBgTexture(bgBlending ? bgNextTex : bgCurrentTex);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, bgTexFrom);
+      gl.uniform1i(locBg.texA, 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, bgTexTo);
+      gl.uniform1i(locBg.texB, 1);
+      gl.uniform1f(locBg.blend, bgBlending ? bgBlend : 1);
+      gl.uniform1f(locBg.mix, bgLoaded ? 0.94 : 0.0);
+      // 首页轻微漂移；战斗中加大视差（仍限制在 clamp 内，用多频 sin 模拟纵深移动）
+      var du;
+      var dv;
+      if (gameStarted && !gameOver) {
+        du =
+          Math.sin(bgPanT * 0.86) * 0.094 +
+          Math.sin(bgPanT * 0.31) * 0.055 +
+          Math.cos(bgPanT * 0.46) * 0.032 +
+          Math.sin(worldTravelX * 0.068) * 0.118 +
+          (playerY - PLAYER_Y_DEFAULT) * 0.03;
+        dv =
+          Math.cos(bgPanT * 0.76) * 0.104 +
+          Math.sin(bgPanT * 0.43) * 0.058 +
+          Math.sin(bgPanT * 0.22) * 0.038 +
+          (playerY - PLAYER_Y_DEFAULT) * 0.034 -
+          Math.cos(worldTravelX * 0.044) * 0.044;
+      } else {
+        du = Math.sin(bgPanT * 0.32) * 0.02;
+        dv = Math.cos(bgPanT * 0.24) * 0.016;
+      }
+      gl.uniform2f(locBg.scroll, du, dv);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      gl.depthMask(true);
+      gl.enable(gl.DEPTH_TEST);
+      gl.enable(gl.CULL_FACE);
     }
-    gl.uniform2f(locBg.scroll, du, dv);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-    gl.depthMask(true);
-    gl.enable(gl.DEPTH_TEST);
-    gl.enable(gl.CULL_FACE);
 
     // stars：不写深度 + 半透明混合，避免点精灵深度挡战机/子弹
     gl.useProgram(pStar);
@@ -3287,11 +3745,15 @@ var dragAnchorPlayerY = 0;
     // mesh pass
     gl.useProgram(pMesh);
     id4(model);
-    drawMesh(bFloor, nFloor, C_FLOOR, model);
+    if (!introBlocking) {
+      drawMesh(bFloor, nFloor, C_FLOOR, model);
+    }
 
     // 移除远景方块占位物，避免顶部出现“方块天体”伪影
 
-    drawPlayer(now);
+    if (!introBlocking) {
+      drawPlayer(now);
+    }
 
     for (i = 0; i < bullets.length; i++) {
       drawOneBullet(now, i);
